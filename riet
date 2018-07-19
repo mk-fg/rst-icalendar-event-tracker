@@ -1,0 +1,110 @@
+#!/usr/bin/env python3
+
+import itertools as it, operator as op, functools as ft
+import os, sys
+
+
+def parse_cal_list_from_rst(rst_str):
+	from docutils import frontend as rst_front
+	from docutils.parsers import rst
+	import docutils.utils as rst_utils
+
+	class RstLookupError(Exception): pass
+	class RstLookupFound(Exception): pass
+
+	def rst_lookup( root, tag,
+			default=RstLookupError, recursive=False, one=True, text=True ):
+		res, opts = list(), dict(one=one, recursive=recursive)
+		tag = tag.split()
+		if len(tag) > 1:
+			opts_path = dict(opts.items(), text=False)
+			for tag_path in tag[:-1]:
+				if not root: break
+				root = rst_lookup(root, tag_path, **opts_path)
+			tag = tag[-1]
+		else: tag = tag[0]
+		if tag.endswith('...'): one, tag = False, tag[:-3]
+		def collect(e):
+			if one: raise RstLookupFound(e)
+			if isinstance(e, list): res.extend(e)
+			else: res.append(e)
+		if not root: root = list()
+		es = ( root.children if not isinstance(root, list)
+			else it.chain.from_iterable(e.children for e in root) )
+		try:
+			for e in es:
+				if e.tagname == tag: collect(e)
+				if recursive:
+					e = rst_lookup(e, tag, **opts)
+					if e: collect(e)
+		except RstLookupFound as res:
+			res = res.args[0]
+			return res if not text else res.astext()
+		if one or not res:
+			if default is not RstLookupError: return default
+			raise RstLookupError(root, tag)
+		if text: res = list(e.astext() for e in res)
+		return res
+
+	def rst_cal_info(root):
+		try: fields = rst_lookup(root, 'field_list...', text=False)
+		except RstLookupError: return
+		res = dict()
+		for e in rst_lookup(fields, 'field...', text=False):
+			res.setdefault(rst_lookup(e, 'field_name'), list())\
+				.append(rst_lookup(e, 'field_body paragraph'))
+		if not res.get('ts'): return
+		res.update(ts=res['ts'] or list())
+		return res
+
+	def rst_cal_list(root, depth=0, sections=None, cals=None):
+		if cals is None: cals = list()
+		if not sections: sections = list()
+		for e in root.children:
+			e_sec = None
+			if e.tagname == 'section':
+				e_sec = sections.copy() + [rst_lookup(e, 'title')]
+			cal_info = rst_cal_info(e)
+			if cal_info:
+				if not cal_info.get('title'):
+					cal_info['title'] = [ e_sec[-1]
+						if e_sec else rst_lookup(e, 'paragraph') ]
+				cal_info['path'] = sections
+				cals.append(cal_info)
+			rst_cal_list(e, depth+1, e_sec or sections, cals)
+		return cals
+
+	settings = rst_front.OptionParser(components=(rst.Parser,)).get_default_values()
+	rst_tree = rst_utils.new_document('cal_list', settings)
+	rst.Parser().parse(rst_str, rst_tree)
+	return rst_cal_list(rst_tree)
+
+
+def main(args=None):
+	import argparse, textwrap
+
+	dedent = lambda text: (textwrap.dedent(text).strip('\n') + '\n').replace('\t', '  ')
+	class SmartHelpFormatter(argparse.HelpFormatter):
+		def __init__(self, *args, **kws):
+			return super().__init__(*args, **kws, width=100)
+		def _fill_text(self, text, width, indent):
+			if '\n' not in text: return super()._fill_text(text, width, indent)
+			return ''.join(indent + line for line in text.splitlines(keepends=True))
+		def _split_lines(self, text, width):
+			return super()._split_lines(text, width)\
+				if '\n' not in text else dedent(text).splitlines()
+
+	parser = argparse.ArgumentParser(
+		description='ReST-based calendar parser and online event tracker.')
+	parser.add_argument('rst_file', nargs='?',
+		help='ReST (.rst) file with calendar and event descriptions.'
+			' Will be read from stdin, if "-" or not specified.')
+	opts = parser.parse_args(sys.argv[1:] if args is None else args)
+
+	with open( sys.stdin.fileno()
+			if not opts.rst_file or opts.rst_file == '-' else opts.rst_file ) as src:
+		doc_text = src.read()
+
+	print(parse_cal_list_from_rst(doc_text))
+
+if __name__ == '__main__': sys.exit(main())
