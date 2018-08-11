@@ -7,6 +7,10 @@ Python3 script that finds calendar events in easily readable/editable `ReST
 structure, checks any associated feeds or conditions, and creates iCalendar
 entries from these.
 
+Basically a kind of simple local-only non-interactive calendar app
+for those who already know rst and like unixy tools in console
+with built-in "poll url for changes" functionality.
+
 Simple example for one-off event spec anywhere in source rst file::
 
   - Make this rst-calendar parser thing
@@ -44,5 +48,6 @@ Requirements
 ------------
 
 * `Python 3.x <http://python.org/>`_
-* `docutils module <https://docutils.readthedocs.io/>`_ (rst parser)
-* `icalendar module <https://pypi.org/project/icalendar/>`_ (to generate .ics files)
+* `docutils module <https://docutils.readthedocs.io/>`_ - rst parser.
+* `icalendar module <https://pypi.org/project/icalendar/>`_ - to generate .ics files.
+* `pytz <http://pytz.sourceforge.net/>`_ - parsing timezones, also a dep for icalendar.

@@ -1,8 +1,236 @@
 #!/usr/bin/env python3
 
 import itertools as it, operator as op, functools as ft
-import os, sys
+import os, sys, re, datetime as dt, collections as cs
+import subprocess, time
 
+import docutils, pytz
+
+
+class adict(dict):
+	def __init__(self, *args, **kwargs):
+		super().__init__(*args, **kwargs)
+		self.__dict__ = self
+
+
+
+### Date/time parsing helpers
+
+class TSParseError(Exception): pass
+
+_short_ts_days = dict(
+	y=365.25, yr=365.25, year=365.25,
+	mo=30.5, month=30.5, w=7, week=7, d=1, day=1 )
+_short_ts_s = dict(
+	h=3600, hr=3600, hour=3600,
+	m=60, min=60, minute=60,
+	s=1, sec=1, second=1 )
+def _short_ts_re():
+	sub_sort = lambda d: sorted(
+		d.items(), key=lambda kv: (kv[1], len(kv[0])), reverse=True )
+	ts_re = ['^'] + [
+		r'(?P<{0}>\d*{0}\b\s*)?'.format(k)
+		for k, v in it.chain.from_iterable(
+			map(sub_sort, [_short_ts_days, _short_ts_s]) ) ] + ['$']
+	return re.compile(''.join(ts_re), re.I | re.U)
+_short_ts_re = _short_ts_re()
+
+_filter = cs.namedtuple('interval_filter', 'mo_days weekdays time tz')
+_filter_weekdays = list(map(str.split,
+	[ 'mon monday', 'tu tue tuesday tues', 'wed wednesday',
+		'th thu thursday thur thurs', 'fri friday', 'sat saturday', 'sun sunday' ] ))
+_filter_weekdays_re = '(?:{})'.format(
+	'|'.join('|'.join(wd) for wd in _filter_weekdays) )
+
+_delta = cs.namedtuple('interval_delta', 'y mo w d h m s')
+def _delta_keys():
+	ks = dict()
+	for delta_k in _delta._fields:
+		for vs in _short_ts_days, _short_ts_s:
+			if delta_k not in vs: continue
+			v_chk = vs[delta_k]
+			for k, v in vs.items():
+				if v == v_chk: ks[k] = delta_k
+			break
+		else: raise TSParseError(delta_k)
+	return ks
+_delta_keys = _delta_keys()
+_delta_keys_dt = dict(
+	y=(1, 'year'), mo=(1, 'month'), w=dt.timedelta(7), d=dt.timedelta(1),
+	h=dt.timedelta(0, 3600), m=dt.timedelta(0, 60), s=dt.timedelta(0, 1) )
+
+_parse_int = lambda v: int(''.join(c for c in v if c.isdigit()) or 1)
+
+def parse_delta_spec(ts_str):
+	m = _short_ts_re.search(ts_str)
+	if not m or not any(m.groups()): raise TSParseError(ts_str)
+	delta = dict.fromkeys(_delta._fields, 0)
+	for k, delta_k in _delta_keys.items():
+		try: n = _parse_int(m.group(k)) if m.group(k) else 0
+		except IndexError: n = 0
+		delta[delta_k] += n
+	for delta_k, n in delta.items():
+		v = _delta_keys_dt[delta_k]
+		if isinstance(v, dt.timedelta): v *= n
+		else: v = v[0]*n, v[1]
+		delta[delta_k] = v
+	return _delta(**delta)
+
+def parse_duration(ts_str):
+	m = _short_ts_re.search(ts_str)
+	if not m or not any(m.groups()): raise TSParseError(ts_str)
+	delta = list()
+	for units in _short_ts_days, _short_ts_s:
+		val = 0
+		for k, v in units.items():
+			try:
+				if not m.group(k): continue
+				n = _parse_int(m.group(k))
+			except IndexError: continue
+			val += n * v
+		delta.append(val)
+	return dt.timedelta(*delta)
+
+def parse_ts(ts_str):
+	assert isinstance(ts_str, str), [type(ts_str), repr(ts_str)]
+	ts = None
+	if not ts:
+		match = re.search( # common BE format
+			r'^(?P<date>(?:\d{2}|(?P<Y>\d{4}))-\d{2}-\d{2})'
+			r'(?:[ T](?P<time>\d{2}(?::\d{2}(?::\d{2})?)?)?)?$', ts_str )
+		if match:
+			tpl = 'y' if not match.group('Y') else 'Y'
+			tpl, ts_str = '%{}-%m-%d'.format(tpl), match.group('date')
+			if match.group('time'):
+				tpl_time = ['%H', '%M', '%S']
+				ts_str_time = match.group('time').split(':')
+				ts_str += ' ' + ':'.join(ts_str_time)
+				tpl += ' ' + ':'.join(tpl_time[:len(ts_str_time)])
+			try: ts = dt.datetime.strptime(ts_str, tpl)
+			except ValueError: pass
+	if not ts:
+		# coreutils' "date" parses virtually everything, but is more expensive to use
+		proc = subprocess.Popen( ['date', '+%s', '-d', ts_str],
+				stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, close_fds=True )
+		val = proc.stdout.read()
+		if not proc.wait():
+			val = int(val.strip())
+			# Try to add +1 day to simple timestamps like 3:00 if they're in the past
+			# Whitelisted cases: 1:00, 4am, 5am GMT, 3:30 UTC-4
+			if 0 < time.time() - val <= 24*3600 and re.search(
+					r'(?i)^[\d:]+\s*(am|pm)?\s*([-+][\d:]+|\w+|\w+[-+][\d:]+)?$', ts_str.strip() ):
+				val += 24*3600
+			ts = dt.datetime.fromtimestamp(val)
+			if 0 < time.time() - val <= 365*24*3600 and not re.search(r'\b\d{4}\b', ts_str):
+				ts = ts.replace(year=ts.year+1)
+	if ts: return ts
+	raise TSParseError(ts_str)
+
+def parse_ts_interval(ts_str):
+	# EVERY:
+	#   "every" {
+	#     [ ( NN[suffix][ "-" MM[suffix]] )+ | DELTA-DATE-SPEC ]
+	#       [WD[-WD]]+
+	#       ["at"] [TIME ["[" TZ "]"]]
+	#     | DELTA-SPEC "interval" }
+	#   suffix: st, nd, rd, th
+	#   example: every 1st-11th at 5am UTC
+	# DELTA-SPEC:
+	#   ( N || unit )+
+	#   units:
+	#     y, yr, year, mo, month, w, week, d, day,
+	#     h, hr, hour, m, min, minute, s, sec, second
+	#   example: 3mo 1d 5hrs 10minutes 30s
+	# DELTA-DATE-SPEC:
+	#   subset of DELTA-SPEC wrt allowed units
+	#   units: y, yr, year, mo, month, w, week, d, day
+	# WD: see _filter_weekdays abbrevs
+	# TIME: [H]H[:MM[:SS]] ["am"|"pm"]
+	# TZ: ( "UTC" | ("+"|"-") XX:YY | region/place )
+
+	# DELTA-SPEC "interval"
+	m = re.search(r'(?i)^(.*)\binterval$', ts_str)
+	if m: return parse_delta_spec(m.group(1).strip())
+
+	# More conventional specification
+	ts_str_base, dt_filter = ts_str, dict.fromkeys(_filter._fields)
+	mo_days = dt_filter['mo_days'] = set()
+	weekdays = dt_filter['weekdays'] = set()
+	ts_str_re = r'(\s+(?P<rest>.*)|$)'
+
+	# ( NN[suffix][ "-" MM[suffix]] )+
+	while True:
+		m = re.search( r'(?i)^(?P<a>\d+)(st|nd|rd|th)?'
+			r'(\s*-\s*(?P<b>\d+)(st|nd|rd|th)?)?' + ts_str_re, ts_str )
+		if not m: break
+		a, b, ts_str = m.group('a'), m.group('b'), m.group('rest') or ''
+		if b: mo_days.update(range(int(a), int(b)+1))
+		else: mo_days.add(int(a))
+	# DELTA-DATE-SPEC
+	spec, delta, ts_str = ts_str.split(), None, list()
+	while True:
+		if not spec: break
+		try: delta = parse_delta_spec(' '.join(spec))
+		except TSParseError: pass
+		else: break
+		ts_str.append(spec.pop())
+	if delta:
+		if mo_days: raise TSParseError(' '.join(spec), mo_days, delta)
+		if delta.h or delta.m or delta.s: raise TSParseError(' '.join(spec), delta)
+		dt_filter['mo_days'] = delta
+	ts_str = ' '.join(reversed(ts_str))
+	# [WD[-WD]]+
+	wd_re = re.compile( r'(?i)^(?P<a>{0})(\s*-\s*'
+		r'(?P<b>{0}))?{1}'.format(_filter_weekdays_re, ts_str_re) )
+	wd_match = lambda s: next( n for n, wd in
+		enumerate(_filter_weekdays, 1) if s.startswith(wd[0]) )
+	while True:
+		m = wd_re.search(ts_str)
+		if not m: break
+		a, b, ts_str = m.group('a'), m.group('b'), m.group('rest') or ''
+		if b: weekdays.update(range(wd_match(a.lower()), wd_match(b.lower())+1))
+		else: weekdays.add(wd_match(a.lower()))
+	# "at"
+	m = re.search(r'(?i)^\s*at' + ts_str_re, ts_str)
+	if m: ts_str = m.group('rest') or ''
+	# TIME
+	m = re.search( r'(?i)^(?P<h>\d{1,2})(:(?P<m>\d{2})'
+		r'(:(?P<s>\d{2}))?)?(\s*(?P<x>am|pm))?' + ts_str_re, ts_str )
+	if m:
+		x, ts_str = m.group('x'), m.group('rest') or ''
+		h, m, s = (int(m.group(k) or 0) for k in 'h m s'.split())
+		if x.lower() == 'pm': h += 12
+		dt_filter['time'] = h, m, s
+	# TZ
+	m = re.search(r'^\[\s*(\S.*\S)\s*\]' + ts_str_re, ts_str)
+	if m:
+		import pytz
+		dt_filter['tz'], ts_str = pytz.timezone(m.group(1).replace(' ', '_')), m.group('rest')
+	# Leftovers
+	if ts_str: raise TSParseError(ts_str)
+	return _filter(**dt_filter)
+
+def repr_ts_diff( ts, ts0=None, ext=None,
+		_units=dict( h=3600, m=60, s=1,
+			y=365.25*86400, mo=30.5*86400, w=7*86400, d=1*86400 ) ):
+	delta = abs(
+		(ts - (ts0 or dt.datetime.now()))
+		if not isinstance(ts, dt.timedelta) else ts )
+	res, s = list(), delta.total_seconds()
+	for unit, unit_s in sorted(_units.items(), key=op.itemgetter(1), reverse=True):
+		val = math.floor(s / float(unit_s))
+		if not val: continue
+		res.append('{:.0f}{}'.format(val, unit))
+		if len(res) >= 2: break
+		s -= val * unit_s
+	if not res: return 'now'
+	else:
+		if ext: res.append(ext)
+		return ' '.join(res)
+
+
+
+### ReST parser
 
 def parse_cal_list_from_rst(rst_str):
 	from docutils import frontend as rst_front
@@ -51,10 +279,24 @@ def parse_cal_list_from_rst(rst_str):
 		except RstLookupError: return
 		res = dict()
 		for e in rst_lookup(fields, 'field...', text=False):
-			res.setdefault(rst_lookup(e, 'field_name'), list())\
-				.append(rst_lookup(e, 'field_body paragraph'))
-		if not res.get('ts'): return
-		res.update(ts=res['ts'] or list())
+			key = rst_lookup(e, 'field_name').replace('-', '_')
+			res.setdefault(key, list()).append(rst_lookup(e, 'field_body paragraph'))
+		if not (res.get('ts') or res.get('ts_start')): return
+		ts_norm = lambda ts: ts.replace('_', ' ').strip()
+		if res.get('ts'):
+			ts_str_list, res['ts'] = res['ts'], list()
+			for ts in ts_str_list:
+				ts = ts_norm(ts)
+				if not ts: continue
+				m = re.search(r'^every\s+(.*)', ts)
+				res['ts'].append(parse_ts(ts) if not m else parse_ts_interval(m.group(1)))
+		for k in 'ts_start', 'ts_end', 'duration':
+			if not res.get(k):
+				res[k] = None
+				continue
+			assert len(res[k]) == 1, [k, res[k]]
+			res[k] = ( parse_ts if k != 'duration'
+				else parse_duration )(ts_norm(res[k][0]))
 		return res
 
 	def rst_cal_list(root, depth=0, sections=None, cals=None):
@@ -79,6 +321,9 @@ def parse_cal_list_from_rst(rst_str):
 	rst.Parser().parse(rst_str, rst_tree)
 	return rst_cal_list(rst_tree)
 
+
+
+### CLI
 
 def main(args=None):
 	import argparse, textwrap
@@ -105,6 +350,7 @@ def main(args=None):
 			if not opts.rst_file or opts.rst_file == '-' else opts.rst_file ) as src:
 		doc_text = src.read()
 
-	print(parse_cal_list_from_rst(doc_text))
+	cal_list = list(map(adict, parse_cal_list_from_rst(doc_text)))
+	for cal in cal_list: print(cal)
 
 if __name__ == '__main__': sys.exit(main())

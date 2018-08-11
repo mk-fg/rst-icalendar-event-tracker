@@ -15,13 +15,25 @@ Kept in the head of the doc, as stuff is added and removed here all the time.
 AFK life event reminders
 ------------------------
 
-- Birthday
+- Same Date Every Year
 
-  :ts: July 28th
+  :ts: July 28
 
-  .. Note: date will be parsed on each run, as "date -d 'July 28th'" in this
+  .. Note: date will be parsed on each run, as "date -d 'July 28'" in this
      case, so it will get triggered every year, even when specified as a one-off
      date (without "every" prefix) due to how "date" parser works.
+
+- Same Time Every Day
+
+  :ts: 10am
+
+  .. Note: parsed as "first 10am in the future".
+
+- Weekend Days
+
+  :ts: every sat-sun
+
+  .. Note: "every <weekday>-<weekday>" spec, adding recurring event interval.
 
 - New Year Bank Holidays
 
@@ -29,12 +41,7 @@ AFK life event reminders
   :ts-end: Jan 10
 
   .. Note: ts start/end interval spec for event instead of one fixed time.
-
-- Official Weekend Days
-
-  :ts: every sat-sun
-
-  .. Note: "every <weekday>-<weekday>" spec, adding recurring event interval.
+  .. Note: start/end times can only be one-off, not "every X".
 
 
 
@@ -50,7 +57,8 @@ Streams
 
 - Co-Optional podcast
 
-  :ts: every tue at 12pm [Los Angeles]
+  :ts: every tue at 12pm [America/Los_Angeles]
+  :duration: 3h
   :url: https://twitch.tv/totalbiscuit/
 
   .. Note: "every" spec with timezone of a specific place.
@@ -59,6 +67,8 @@ Streams
      auto-change when daylight savings periods start/end, so e.g. BST (+1) won't
      turn into GMT (+0) when explicitly specified and vice-versa, but specifying
      [London] will account for such changes.
+
+  .. Note: duration + ts spec instead of start/end.
 
 
 Podcasts
