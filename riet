@@ -84,7 +84,12 @@ _parse_int = lambda v: int(''.join(c for c in v if c.isdigit()) or 1)
 def get_local_tz():
 	if get_local_tz.cache: return get_local_tz.cache
 
-	import os, ctypes as ct
+	tz = os.environ.get('TZ', '').strip()
+	if tz:
+		get_local_tz.cache = pytz.timezone(tz)
+		return get_local_tz.cache
+
+	import ctypes as ct
 
 	class sd_bus(ct.Structure): pass
 	class sd_bus_error(ct.Structure):
