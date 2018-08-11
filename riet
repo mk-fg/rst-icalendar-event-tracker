@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 
 import itertools as it, operator as op, functools as ft
-import os, sys, re, datetime as dt, collections as cs
-import subprocess, time
+import os, sys, logging, re, time, math, subprocess
+import datetime as dt, collections as cs
 
 import docutils, pytz
 
@@ -12,11 +12,33 @@ class adict(dict):
 		super().__init__(*args, **kwargs)
 		self.__dict__ = self
 
+class LogMessage(object):
+	def __init__(self, fmt, a, k): self.fmt, self.a, self.k = fmt, a, k
+	def __str__(self): return self.fmt.format(*self.a, **self.k) if self.a or self.k else self.fmt
+
+class LogStyleAdapter(logging.LoggerAdapter):
+	def __init__(self, logger, extra=None):
+		super(LogStyleAdapter, self).__init__(logger, extra or {})
+	def log(self, level, msg, *args, **kws):
+		if not self.isEnabledFor(level): return
+		log_kws = {} if 'exc_info' not in kws else dict(exc_info=kws.pop('exc_info'))
+		msg, kws = self.process(msg, kws)
+		self.logger._log(level, LogMessage(msg, args, kws), (), **log_kws)
+
+get_logger = lambda name: LogStyleAdapter(logging.getLogger(name))
+log = get_logger('main')
 
 
-### Date/time parsing helpers
+
+### Date/time processing helpers
 
 class TSParseError(Exception): pass
+class TSOverflow(Exception): pass
+
+IntervalFilter = cs.namedtuple('interval_filter', 'mo_days weekdays time tz')
+IntervalDelta = cs.namedtuple('interval_delta', 'y mo w d h m s')
+
+weekday_names = 'mon tue wed thu fri sat sun'.title().split()
 
 _short_ts_days = dict(
 	y=365.25, yr=365.25, year=365.25,
@@ -35,17 +57,15 @@ def _short_ts_re():
 	return re.compile(''.join(ts_re), re.I | re.U)
 _short_ts_re = _short_ts_re()
 
-_filter = cs.namedtuple('interval_filter', 'mo_days weekdays time tz')
 _filter_weekdays = list(map(str.split,
 	[ 'mon monday', 'tu tue tuesday tues', 'wed wednesday',
 		'th thu thursday thur thurs', 'fri friday', 'sat saturday', 'sun sunday' ] ))
 _filter_weekdays_re = '(?:{})'.format(
 	'|'.join('|'.join(wd) for wd in _filter_weekdays) )
 
-_delta = cs.namedtuple('interval_delta', 'y mo w d h m s')
 def _delta_keys():
 	ks = dict()
-	for delta_k in _delta._fields:
+	for delta_k in IntervalDelta._fields:
 		for vs in _short_ts_days, _short_ts_s:
 			if delta_k not in vs: continue
 			v_chk = vs[delta_k]
@@ -56,15 +76,75 @@ def _delta_keys():
 	return ks
 _delta_keys = _delta_keys()
 _delta_keys_dt = dict(
-	y=(1, 'year'), mo=(1, 'month'), w=dt.timedelta(7), d=dt.timedelta(1),
-	h=dt.timedelta(0, 3600), m=dt.timedelta(0, 60), s=dt.timedelta(0, 1) )
+	y=(1, 'year'), mo=(1, 'month'), w=dt.timedelta(weeks=1), d=dt.timedelta(days=1),
+	h=dt.timedelta(hours=1), m=dt.timedelta(minutes=1), s=dt.timedelta(seconds=1) )
 
 _parse_int = lambda v: int(''.join(c for c in v if c.isdigit()) or 1)
+
+def get_local_tz():
+	if get_local_tz.cache: return get_local_tz.cache
+
+	import os, ctypes as ct
+
+	class sd_bus(ct.Structure): pass
+	class sd_bus_error(ct.Structure):
+		_fields_ = [('name', ct.c_char_p), ('message', ct.c_char_p), ('need_free', ct.c_int)]
+	class sd_bus_msg(ct.Structure): pass
+
+	lib = ct.CDLL('libsystemd.so')
+
+	def run(call, *args, sig=None, check=True):
+		func = getattr(lib, call)
+		if sig: func.argtypes = sig
+		res = func(*args)
+		if check and res < 0: raise OSError(-res, os.strerror(-res))
+		return res
+
+	bus, error, reply = (
+		ct.POINTER(sd_bus)(), sd_bus_error(), ct.POINTER(sd_bus_msg)() )
+	run( 'sd_bus_open_system', ct.byref(bus),
+		sig=[ct.POINTER(ct.POINTER(sd_bus))] )
+	try:
+		run( 'sd_bus_get_property',
+			bus,
+			b'org.freedesktop.timedate1',
+			b'/org/freedesktop/timedate1',
+			b'org.freedesktop.timedate1',
+			b'Timezone',
+			ct.byref(error),
+			ct.byref(reply),
+			b's',
+			sig=[
+				ct.POINTER(sd_bus),
+				ct.c_char_p, ct.c_char_p, ct.c_char_p, ct.c_char_p,
+				ct.POINTER(sd_bus_error),
+				ct.POINTER(ct.POINTER(sd_bus_msg)),
+				ct.c_char_p ] )
+		tz = ct.c_char_p()
+		n = run( 'sd_bus_message_read', reply, b's', ct.byref(tz),
+			sig=[ct.POINTER(sd_bus_msg), ct.c_char_p, ct.POINTER(ct.c_char_p)] )
+		assert n > 0, n
+	finally:
+		run('sd_bus_flush', bus, check=False)
+		run('sd_bus_close', bus, check=False)
+		run('sd_bus_unref', bus, check=False)
+	get_local_tz.cache = pytz.timezone(tz.value.decode())
+	return get_local_tz.cache
+get_local_tz.cache = None
+
+def normalize_ts(ts):
+	if not ts: return
+	if not ts.tzinfo: ts = get_local_tz().localize(ts)
+	return ts.astimezone(pytz.utc)
+
+def localize_ts(ts):
+	if not ts: return
+	return ts.astimezone(get_local_tz())
 
 def parse_delta_spec(ts_str):
 	m = _short_ts_re.search(ts_str)
 	if not m or not any(m.groups()): raise TSParseError(ts_str)
-	delta = dict.fromkeys(_delta._fields, 0)
+	delta = dict.fromkeys(IntervalDelta._fields, 0)
 	for k, delta_k in _delta_keys.items():
 		try: n = _parse_int(m.group(k)) if m.group(k) else 0
 		except IndexError: n = 0
@@ -74,7 +154,7 @@ def parse_delta_spec(ts_str):
 		if isinstance(v, dt.timedelta): v *= n
 		else: v = v[0]*n, v[1]
 		delta[delta_k] = v
-	return _delta(**delta)
+	return IntervalDelta(**delta)
 
 def parse_duration(ts_str):
 	m = _short_ts_re.search(ts_str)
@@ -153,7 +233,7 @@ def parse_ts_interval(ts_str):
 	if m: return parse_delta_spec(m.group(1).strip())
 
 	# More conventional specification
-	ts_str_base, dt_filter = ts_str, dict.fromkeys(_filter._fields)
+	ts_str_base, dt_filter = ts_str, dict.fromkeys(IntervalFilter._fields)
 	mo_days = dt_filter['mo_days'] = set()
 	weekdays = dt_filter['weekdays'] = set()
 	ts_str_re = r'(\s+(?P<rest>.*)|$)'
@@ -199,7 +279,7 @@ def parse_ts_interval(ts_str):
 	if m:
 		x, ts_str = m.group('x'), m.group('rest') or ''
 		h, m, s = (int(m.group(k) or 0) for k in 'h m s'.split())
-		if x.lower() == 'pm': h += 12
+		if x.lower() == 'pm': h = h%12 + 12
 		dt_filter['time'] = h, m, s
 	# TZ
 	m = re.search(r'^\[\s*(\S.*\S)\s*\]' + ts_str_re, ts_str)
@@ -208,7 +288,7 @@ def parse_ts_interval(ts_str):
 		dt_filter['tz'], ts_str = pytz.timezone(m.group(1).replace(' ', '_')), m.group('rest')
 	# Leftovers
 	if ts_str: raise TSParseError(ts_str)
-	return _filter(**dt_filter)
+	return IntervalFilter(**dt_filter)
 
 def repr_ts_diff( ts, ts0=None, ext=None,
 		_units=dict( h=3600, m=60, s=1,
@@ -223,10 +303,40 @@ def repr_ts_diff( ts, ts0=None, ext=None,
 		res.append('{:.0f}{}'.format(val, unit))
 		if len(res) >= 2: break
 		s -= val * unit_s
-	if not res: return 'now'
+	if not res: return '-'
 	else:
 		if ext: res.append(ext)
 		return ' '.join(res)
+
+def apply_ts_delta( ts, delta,
+		ts_limit=normalize_ts(dt.datetime.now()) + dt.timedelta(365) ):
+	if isinstance(delta, IntervalDelta):
+		for offset in delta:
+			if isinstance(offset, tuple):
+				n, k = offset
+				if n != 0:
+					n = getattr(ts, k) + n
+					if k == 'month' and n > 12:
+						while n > 12: ts, n = ts.replace(year=ts.year+1), n - 12
+						ts = ts.replace(month=n)
+					else: ts = ts.replace(**{k: n})
+			elif offset.total_seconds() != 0: ts += offset
+	elif isinstance(delta, IntervalFilter):
+		day = dt.timedelta(1)
+		ts0, ts = ts, ts - day
+		if not ts0.tzinfo: ts0
+		while True:
+			if ts > ts_limit: raise TSOverflow(ts_limit, delta)
+			ts += day
+			if ( delta.mo_days
+				and isinstance(delta.mo_days, set)
+				and ts.day not in delta.mo_days ): continue
+			if delta.weekdays and ts.isoweekday() not in delta.weekdays: continue
+			if delta.time: ts = ts.replace(**dict(zip('hour minute second'.split(), delta.time)))
+			if delta.tz: ts = normalize_ts(delta.tz.localize(ts.replace(tzinfo=None)))
+			if ts > ts0: return ts
+	else: raise NotImplementedError(delta)
+	return ts
 
 
 
@@ -282,21 +392,25 @@ def parse_cal_list_from_rst(rst_str):
 			key = rst_lookup(e, 'field_name').replace('-', '_')
 			res.setdefault(key, list()).append(rst_lookup(e, 'field_body paragraph'))
 		if not (res.get('ts') or res.get('ts_start')): return
-		ts_norm = lambda ts: ts.replace('_', ' ').strip()
+		ts_str_norm = lambda ts: ts.replace('_', ' ').strip()
 		if res.get('ts'):
 			ts_str_list, res['ts'] = res['ts'], list()
+			res['raw_ts'] = ts_str_list
 			for ts in ts_str_list:
-				ts = ts_norm(ts)
+				ts = ts_str_norm(ts)
 				if not ts: continue
 				m = re.search(r'^every\s+(.*)', ts)
-				res['ts'].append(parse_ts(ts) if not m else parse_ts_interval(m.group(1)))
+				res['ts'].append( parse_ts(ts)
+					if not m else parse_ts_interval(m.group(1)) )
+		else: res['ts'] = res['raw_ts'] = list()
 		for k in 'ts_start', 'ts_end', 'duration':
+			k_raw = f'raw_{k}'
 			if not res.get(k):
-				res[k] = None
+				res[k] = res[k_raw] = None
 				continue
 			assert len(res[k]) == 1, [k, res[k]]
-			res[k] = ( parse_ts if k != 'duration'
-				else parse_duration )(ts_norm(res[k][0]))
+			res[k_raw], res[k] = res[k], ( parse_ts
+				if k != 'duration' else parse_duration )(ts_str_norm(res[k][0]))
 		return res
 
 	def rst_cal_list(root, depth=0, sections=None, cals=None):
@@ -309,8 +423,8 @@ def parse_cal_list_from_rst(rst_str):
 			cal_info = rst_cal_info(e)
 			if cal_info:
 				if not cal_info.get('title'):
-					cal_info['title'] = [ e_sec[-1]
-						if e_sec else rst_lookup(e, 'paragraph') ]
+					cal_info['title'] = ( e_sec[-1]
+						if e_sec else rst_lookup(e, 'paragraph') )
 				cal_info['path'] = sections
 				cals.append(cal_info)
 			rst_cal_list(e, depth+1, e_sec or sections, cals)
@@ -344,13 +458,49 @@ def main(args=None):
 	parser.add_argument('rst_file', nargs='?',
 		help='ReST (.rst) file with calendar and event descriptions.'
 			' Will be read from stdin, if "-" or not specified.')
+	# parser.add_argument('-c', '--cache', metavar='path', help='Path to cache file.')
+	parser.add_argument('-t', '--timespan', metavar='delta', default='1w',
+		help='Time delta from now to generate calendar entries for. Default: %(default)s')
+	parser.add_argument('--debug', action='store_true', help='Verbose operation mode.')
 	opts = parser.parse_args(sys.argv[1:] if args is None else args)
+
+	logging.basicConfig( datefmt='%Y-%m-%d %H:%M:%S',
+		# format='%(asctime)s :: %(name)s %(levelname)s :: %(message)s',
+		format='%(levelname)s :: %(message)s',
+		level=logging.DEBUG if opts.debug else logging.WARNING )
 
 	with open( sys.stdin.fileno()
 			if not opts.rst_file or opts.rst_file == '-' else opts.rst_file ) as src:
 		doc_text = src.read()
 
-	cal_list = list(map(adict, parse_cal_list_from_rst(doc_text)))
-	for cal in cal_list: print(cal)
+	ts_now = dt.datetime.utcnow().replace(tzinfo=pytz.utc)
+	ts0_cache_mock = ts_now - dt.timedelta(1) # XXX: per-entry cache
+
+	cal_list = parse_cal_list_from_rst(doc_text)
+	for cal in map(adict, cal_list):
+		ts_list, ts0, ts1 = cal.ts, cal.ts_start, cal.ts_end
+		ts0, ts1 = map(normalize_ts, [ts0, ts1])
+		ts0_cache = ts0_cache_mock if not ts0 else None
+		for ts in ts_list:
+			if isinstance(ts, dt.datetime):
+				if ts0 and ts1:
+					log.warning( 'Ignoring fixed-time "ts" field for entry,'
+						' as "ts-start"/"ts-end" are used instead: {!r} [{}]', cal.title, ts )
+				elif not ts0: ts0 = normalize_ts(ts)
+			else:
+				if not ts0: ts0 = ts0_cache or ts_now
+				if ts1 and ts0 > ts1: continue # skip past event
+				while ts0 < ts_now: ts0 = apply_ts_delta(ts0, ts)
+			assert ts0, cal
+			if not ts1:
+				ts1 = ts0
+				if cal.duration: ts1 += cal.duration
+
+			log.debug('----- title: {}', cal.title)
+			log.debug('  cache: {}', localize_ts(ts0_cache))
+			log.debug('  raw:   {} {} {}', cal.raw_ts, cal.raw_ts_start, cal.raw_ts_end)
+			log.debug('  result [{}]:', repr_ts_diff(ts1 - ts0))
+			log.debug('    from: {} {}', weekday_names[ts0.weekday()], localize_ts(ts0))
+			log.debug('    to:   {} {}', weekday_names[ts0.weekday()], localize_ts(ts1))
 
 if __name__ == '__main__': sys.exit(main())
