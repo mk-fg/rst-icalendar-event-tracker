@@ -5,7 +5,7 @@ rst-icalendar-event-tracker (riet)
 Python3 script that finds calendar events in easily readable/editable `ReST
 (.rst) <https://en.wikipedia.org/wiki/ReStructuredText>`_ files with free-form
 structure, checks any associated feeds or conditions, and creates iCalendar
-entries from these.
+entries and/or conky configuration snippets from these.
 
 Basically a kind of simple local-only non-interactive calendar app
 for those who already know rst and like unixy tools in console
@@ -49,5 +49,5 @@ Requirements
 
 * `Python 3.x <http://python.org/>`_
 * `docutils module <https://docutils.readthedocs.io/>`_ - rst parser.
-* `icalendar module <https://pypi.org/project/icalendar/>`_ - to generate .ics files.
+* `icalendar module <https://pypi.org/project/icalendar/>`_ - only when generating .ics files with -i/--ical option.
 * `pytz <http://pytz.sourceforge.net/>`_ - parsing timezones, also a dep for icalendar.
