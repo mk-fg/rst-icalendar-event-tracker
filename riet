@@ -4,7 +4,7 @@ import itertools as it, operator as op, functools as ft
 import os, sys, logging, re, time, math, subprocess
 import datetime as dt, collections as cs
 
-import docutils, pytz
+import docutils, pytz, icalendar as ic
 
 
 class adict(dict):
@@ -293,9 +293,7 @@ def parse_ts_interval(ts_str):
 		dt_filter['time'] = h, m, s
 	# TZ
 	m = re.search(r'^\[\s*(\S.*\S)\s*\]' + ts_str_re, ts_str)
-	if m:
-		import pytz
-		dt_filter['tz'], ts_str = pytz.timezone(m.group(1).replace(' ', '_')), m.group('rest')
+	if m: dt_filter['tz'], ts_str = pytz.timezone(m.group(1).replace(' ', '_')), m.group('rest')
 	# Leftovers
 	if ts_str: raise TSParseError(ts_str)
 	return IntervalFilter(**dt_filter)
@@ -468,6 +466,9 @@ def main(args=None):
 	parser.add_argument('rst_file', nargs='?',
 		help='ReST (.rst) file with calendar and event descriptions.'
 			' Will be read from stdin, if "-" or not specified.')
+	parser.add_argument('ics_file', nargs='?',
+		help='ICS (icalendar) output file to create.'
+			' Will be printed to stdout, if "-" or not specified.')
 	# parser.add_argument('-c', '--cache', metavar='path', help='Path to cache file.')
 	parser.add_argument('-e', '--event', metavar='title-part',
 		help='Only match event(s) with specified part (case-insensitive) included in the title.')
@@ -488,6 +489,11 @@ def main(args=None):
 	ts_now = dt.datetime.utcnow().replace(tzinfo=pytz.utc)
 	ts_max = ts_now + parse_duration(opts.timespan)
 	ts0_cache_mock = ts_now - dt.timedelta(1) # XXX: per-entry cache
+
+	# https://tools.ietf.org/html/rfc5545
+	ical, ev = ic.Calendar(), None
+	ical.add('prodid', '-//rst-icalendar-event-tracker//fraggod.net//EN')
+	ical.add('version', '2.0')
 
 	cal_list = parse_cal_list_from_rst(doc_text)
 	for cal in map(adict, cal_list):
@@ -525,5 +531,20 @@ def main(args=None):
 		log.debug('  result [{}]:', repr_ts_diff(ts1 - ts0))
 		log.debug('    from: {} {}', weekday_names[ts0.weekday()], localize_ts(ts0))
 		log.debug('    to:   {} {}', weekday_names[ts0.weekday()], localize_ts(ts1))
+
+		ev = ic.Event()
+		ev.add('summary', cal.title)
+		ev.add('dtstart', localize_ts(ts0))
+		ev.add('dtend', localize_ts(ts1))
+		ev.add('dtstamp', localize_ts(ts_now))
+		if cal.get('url'): ev.add('url', cal.url)
+		ical.add_component(ev)
+
+	if ev:
+		log.debug('Generating resulting ICS file...')
+		with open( sys.stdout.fileno()
+				if not opts.ics_file or opts.ics_file == '-' else opts.ics_file, 'wb' ) as src:
+			src.write(ical.to_ical())
+	else: log.debug('No calendar entries within timespan, skipping icalendar generation')
 
 if __name__ == '__main__': sys.exit(main())
