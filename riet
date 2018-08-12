@@ -138,11 +138,13 @@ def get_local_tz():
 get_local_tz.cache = None
 
 def normalize_ts(ts):
+	'Interpret any naive datetime as local-tz and convert to UTC.'
 	if not ts: return
 	if not ts.tzinfo: ts = get_local_tz().localize(ts)
 	return ts.astimezone(pytz.utc)
 
 def localize_ts(ts):
+	'Convert datetime to local timezone for human output.'
 	if not ts: return
 	return ts.astimezone(get_local_tz())
 
@@ -195,19 +197,22 @@ def parse_ts(ts_str):
 			except ValueError: pass
 	if not ts:
 		# coreutils' "date" parses virtually everything, but is more expensive to use
-		proc = subprocess.Popen( ['date', '+%s', '-d', ts_str],
-				stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, close_fds=True )
-		val = proc.stdout.read()
-		if not proc.wait():
-			val = int(val.strip())
-			# Try to add +1 day to simple timestamps like 3:00 if they're in the past
-			# Whitelisted cases: 1:00, 4am, 5am GMT, 3:30 UTC-4
-			if 0 < time.time() - val <= 24*3600 and re.search(
-					r'(?i)^[\d:]+\s*(am|pm)?\s*([-+][\d:]+|\w+|\w+[-+][\d:]+)?$', ts_str.strip() ):
-				val += 24*3600
-			ts = dt.datetime.fromtimestamp(val)
-			if 0 < time.time() - val <= 365*24*3600 and not re.search(r'\b\d{4}\b', ts_str):
-				ts = ts.replace(year=ts.year+1)
+		ts_ext = [ts_str]
+		while True:
+			res = subprocess.run( ['date', '+%s', '-d', ' '.join(ts_ext)],
+					stdout=subprocess.PIPE, stderr=subprocess.DEVNULL )
+			if not res.returncode:
+				val = int(res.stdout.strip())
+				# Try to add +1 day to simple timestamps like 3:00 if they're in the past
+				# Whitelisted cases: 1:00, 4am, 5am GMT, 3:30 UTC-4
+				if 0 < time.time() - val <= 24*3600 and re.search(
+						r'(?i)^[\d:]+\s*(am|pm)?\s*([-+][\d:]+|\w+|\w+[-+][\d:]+)?$', ts_str.strip() ):
+					ts_ext.append('+ 1 day') # note: just val+=24*3600 can be incorrect due to DST
+					continue
+				ts = dt.datetime.fromtimestamp(val) # note: naive dt in local tz
+				if 0 < time.time() - val <= 365*24*3600 and not re.search(r'\b\d{4}\b', ts_str):
+					ts = ts.replace(year=ts.year+1)
+			break
 	if ts: return ts
 	raise TSParseError(ts_str)
 
@@ -231,7 +236,7 @@ def parse_ts_interval(ts_str):
 	#   units: y, yr, year, mo, month, w, week, d, day
 	# WD: see _filter_weekdays abbrevs
 	# TIME: [H]H[:MM[:SS]] ["am"|"pm"]
-	# TZ: ( "UTC" | ("+"|"-") XX:YY | region/place )
+	# TZ: ( "UTC" | ("+"|"-") HH:MM | region/place )
 
 	# DELTA-SPEC "interval"
 	m = re.search(r'(?i)^(.*)\binterval$', ts_str)
@@ -284,7 +289,7 @@ def parse_ts_interval(ts_str):
 	if m:
 		x, ts_str = m.group('x'), m.group('rest') or ''
 		h, m, s = (int(m.group(k) or 0) for k in 'h m s'.split())
-		if x.lower() == 'pm': h = h%12 + 12
+		if x and x.lower() == 'pm': h = h%12 + 12
 		dt_filter['time'] = h, m, s
 	# TZ
 	m = re.search(r'^\[\s*(\S.*\S)\s*\]' + ts_str_re, ts_str)
@@ -464,7 +469,9 @@ def main(args=None):
 		help='ReST (.rst) file with calendar and event descriptions.'
 			' Will be read from stdin, if "-" or not specified.')
 	# parser.add_argument('-c', '--cache', metavar='path', help='Path to cache file.')
-	parser.add_argument('-t', '--timespan', metavar='delta', default='1w',
+	parser.add_argument('-e', '--event', metavar='title-part',
+		help='Only match event(s) with specified part (case-insensitive) included in the title.')
+	parser.add_argument('-t', '--timespan', metavar='delta', default='1mo',
 		help='Time delta from now to generate calendar entries for. Default: %(default)s')
 	parser.add_argument('--debug', action='store_true', help='Verbose operation mode.')
 	opts = parser.parse_args(sys.argv[1:] if args is None else args)
@@ -479,12 +486,16 @@ def main(args=None):
 		doc_text = src.read()
 
 	ts_now = dt.datetime.utcnow().replace(tzinfo=pytz.utc)
+	ts_max = ts_now + parse_duration(opts.timespan)
 	ts0_cache_mock = ts_now - dt.timedelta(1) # XXX: per-entry cache
 
 	cal_list = parse_cal_list_from_rst(doc_text)
 	for cal in map(adict, cal_list):
+		if opts.event and opts.event.lower() not in cal.title.lower(): continue
+
 		ts_list, ts0, ts1 = cal.ts, cal.ts_start, cal.ts_end
 		ts0, ts1 = map(normalize_ts, [ts0, ts1])
+		if ts1 and ts1 < ts0: ts1 = ts1.replace(year=ts1.year + 1)
 		ts0_cache = ts0_cache_mock if not ts0 else None
 		for ts in ts_list:
 			if isinstance(ts, dt.datetime):
@@ -494,18 +505,25 @@ def main(args=None):
 				elif not ts0: ts0 = normalize_ts(ts)
 			else:
 				if not ts0: ts0 = ts0_cache or ts_now
-				if ts1 and ts0 > ts1: continue # skip past event
-				while ts0 < ts_now: ts0 = apply_ts_delta(ts0, ts)
-			assert ts0, cal
-			if not ts1:
-				ts1 = ts0
-				if cal.duration: ts1 += cal.duration
+				if ts1 and ts0 > ts1: # event ending in the past
+					ts0 = None
+					break
+				try:
+					while ts0 < ts_now: ts0 = apply_ts_delta(ts0, ts, ts_max)
+				except TSOverflow: # no events within timespan
+					ts0 = None
+					break
+		if not ts0: continue
+		if not ts1:
+			ts1 = ts0
+			if cal.duration: ts1 += cal.duration
+		if ts1 < ts_now or ts0 > ts_max: continue
 
-			log.debug('----- title: {}', cal.title)
-			log.debug('  cache: {}', localize_ts(ts0_cache))
-			log.debug('  raw:   {} {} {}', cal.raw_ts, cal.raw_ts_start, cal.raw_ts_end)
-			log.debug('  result [{}]:', repr_ts_diff(ts1 - ts0))
-			log.debug('    from: {} {}', weekday_names[ts0.weekday()], localize_ts(ts0))
-			log.debug('    to:   {} {}', weekday_names[ts0.weekday()], localize_ts(ts1))
+		log.debug('----- title: {}', cal.title)
+		log.debug('  cache: {}', localize_ts(ts0_cache))
+		log.debug('  raw:   {} {} {}', cal.raw_ts, cal.raw_ts_start, cal.raw_ts_end)
+		log.debug('  result [{}]:', repr_ts_diff(ts1 - ts0))
+		log.debug('    from: {} {}', weekday_names[ts0.weekday()], localize_ts(ts0))
+		log.debug('    to:   {} {}', weekday_names[ts0.weekday()], localize_ts(ts1))
 
 if __name__ == '__main__': sys.exit(main())
