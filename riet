@@ -59,6 +59,7 @@ IntervalFilter = cs.namedtuple('interval_filter', 'mo_days weekdays time tz')
 IntervalDelta = cs.namedtuple('interval_delta', 'y mo w d h m s')
 
 weekday_names = 'mon tue wed thu fri sat sun'.title().split()
+delta_1s, delta_1d = dt.timedelta(seconds=1), dt.timedelta(days=1)
 
 _short_ts_days = dict(
 	y=365.25, yr=365.25, year=365.25,
@@ -102,6 +103,7 @@ _delta_keys_dt = dict(
 _parse_int = lambda v: int(''.join(c for c in v if c.isdigit()) or 1)
 
 def get_local_tz():
+	# Cached on first access to avoid dbus call on import
 	if get_local_tz.cache: return get_local_tz.cache
 
 	tz = os.environ.get('TZ', '').strip()
@@ -157,13 +159,13 @@ def get_local_tz():
 	return get_local_tz.cache
 get_local_tz.cache = None
 
-def normalize_ts(ts):
+def conv_ts_utc(ts):
 	'Interpret any naive datetime as local-tz and convert to UTC.'
 	if not ts: return
-	if not ts.tzinfo: ts = get_local_tz().localize(ts)
+	if not ts.tzinfo: ts = get_local_tz().localize(ts, is_dst=None)
 	return ts.astimezone(pytz.utc)
 
-def localize_ts(ts):
+def conv_ts_local(ts):
 	'Convert datetime to local timezone for human output.'
 	if not ts: return
 	return ts.astimezone(get_local_tz())
@@ -198,7 +200,7 @@ def parse_duration(ts_str):
 		delta.append(val)
 	return dt.timedelta(*delta)
 
-def parse_ts(ts_str):
+def parse_ts(ts_str, in_future=True):
 	assert isinstance(ts_str, str), [type(ts_str), repr(ts_str)]
 	ts = None
 	if not ts:
@@ -225,13 +227,13 @@ def parse_ts(ts_str):
 				val = int(res.stdout.strip())
 				# Try to add +1 day to simple timestamps like 3:00 if they're in the past
 				# Whitelisted cases: 1:00, 4am, 5am GMT, 3:30 UTC-4
-				if 0 < time.time() - val <= 24*3600 and re.search(
+				if in_future and 0 < time.time() - val <= 24*3600 and re.search(
 						r'(?i)^[\d:]+\s*(am|pm)?\s*([-+][\d:]+|\w+|\w+[-+][\d:]+)?$', ts_str.strip() ):
 					ts_ext.append('+ 1 day') # note: just val+=24*3600 can be incorrect due to DST
 					continue
 				ts = dt.datetime.fromtimestamp(val) # note: naive dt in local tz
-				if 0 < time.time() - val <= 365*24*3600 and not re.search(r'\b\d{4}\b', ts_str):
-					ts = ts.replace(year=ts.year+1)
+				if ( in_future and 0 < time.time() - val <= 365*24*3600
+					and not re.search(r'\b\d{4}\b', ts_str) ): ts = ts.replace(year=ts.year+1)
 			break
 	if ts: return ts
 	raise TSParseError(ts_str)
@@ -318,18 +320,24 @@ def parse_ts_interval(ts_str):
 	if ts_str: raise TSParseError(ts_str)
 	return IntervalFilter(**dt_filter)
 
-def repr_ts_diff( ts, ts0=None, ext=None,
+def repr_ts(ts):
+	if not ts: return str(ts)
+	return conv_ts_local(ts)\
+		.strftime('[%a %Y-%m-%d %H:%M:%S.%f %z]')
+
+def repr_ts_diff( ts, ts0=None, ext=None, units_max=2,
 		_units=dict( h=3600, m=60, s=1,
 			y=365.25*86400, mo=30.5*86400, w=7*86400, d=1*86400 ) ):
 	delta = abs(
 		(ts - (ts0 or dt.datetime.now()))
 		if not isinstance(ts, dt.timedelta) else ts )
-	res, s = list(), delta.total_seconds()
+	res, s, n_last = list(), delta.total_seconds(), units_max - 1
 	for unit, unit_s in sorted(_units.items(), key=op.itemgetter(1), reverse=True):
-		val = math.floor(s / float(unit_s))
+		val = math.floor(s / unit_s)
 		if not val: continue
+		if len(res) == n_last: val, n_last = round(s / unit_s), True
 		res.append('{:.0f}{}'.format(val, unit))
-		if len(res) >= 2: break
+		if n_last is True: break
 		s -= val * unit_s
 	if not res: return '-'
 	else:
@@ -337,7 +345,7 @@ def repr_ts_diff( ts, ts0=None, ext=None,
 		return ' '.join(res)
 
 def apply_ts_delta( ts, delta,
-		ts_limit=normalize_ts(dt.datetime.now()) + dt.timedelta(365) ):
+		ts_limit=conv_ts_utc(dt.datetime.now()) + dt.timedelta(365) ):
 	if isinstance(delta, IntervalDelta):
 		for offset in delta:
 			if isinstance(offset, tuple):
@@ -350,19 +358,20 @@ def apply_ts_delta( ts, delta,
 					else: ts = ts.replace(**{k: n})
 			elif offset.total_seconds() != 0: ts += offset
 	elif isinstance(delta, IntervalFilter):
-		day = dt.timedelta(1)
-		ts0, ts = ts, ts - day
-		if not ts0.tzinfo: ts0
+		ts0, ts_ref = ts, ts - delta_1d
 		while True:
-			if ts > ts_limit: raise TSOverflow(ts_limit, delta)
-			ts += day
+			if ts_ref > ts_limit: raise TSOverflow(ts_limit, delta)
+			ts_ref += delta_1d
+			if delta.tz: ts = delta.tz.localize(ts_ref.replace(tzinfo=None), is_dst=None)
+			else: ts = conv_ts_local(ts_ref)
 			if ( delta.mo_days
 				and isinstance(delta.mo_days, set)
 				and ts.day not in delta.mo_days ): continue
 			if delta.weekdays and ts.isoweekday() not in delta.weekdays: continue
-			if delta.time: ts = ts.replace(**dict(zip('hour minute second'.split(), delta.time)))
-			if delta.tz: ts = normalize_ts(delta.tz.localize(ts.replace(tzinfo=None)))
-			if ts > ts0: return ts
+			ts = ts.replace( microsecond=0,
+				**dict(zip('hour minute second'.split(), delta.time or (0, 0, 0))) )
+			ts = conv_ts_utc(ts)
+			if ts > ts0: break
 	else: raise NotImplementedError(delta)
 	return ts
 
@@ -465,25 +474,72 @@ def parse_cal_list_from_rst(rst_str):
 
 
 
-### CLI
+### Conky config generator
 
-def generate_conky_config(dst, day0, day1, events, conky_params):
-	day, delta_1s, delta_1d = day0, dt.timedelta(seconds=1), dt.timedelta(days=1)
-	cc, lines = adict(conky_params), 0
+ConkyEvent = cs.namedtuple('ConkyEvent', 'ts0 ts1 title')
+
+conky_params_default = dict(
+	max_text_lines=9, max_text_break='${alignr}[more]', max_text_color='d9374c',
+	color='', line_color='aaa', line_pos=-9, line_step=1, line_w=1,
+	c_weekday='lightgray', c_date='gray', c_time='lightgray', c_title='',
+	c_eta_day='lightgray', c_eta_pass='999', c_eta_12='42a150', c_eta_6='9ebd5f',
+	c_eta_4='d9d277', c_eta_3='f4ae58', c_eta_2='e87733', c_eta_1='d10027',
+	pos_weekday=65, pos_date=0, pos_title=170,
+	pos_time_fixed=110, pos_time_span=100, pos_time_from=100, pos_time_until=100 )
+
+def conky_event_time_repr(ts_now, day, ts0, ts1):
+	'Return string repr for time within specified day, time/span type and delta until event.'
+	tk = None
+	if ts0 == ts1 or (ts1 - ts0).total_seconds() < 3*60:
+		if not ts0.hour == ts0.minute == 0: tk = 'fixed'
+	elif (ts0 - delta_1s).date() < day and (ts1 + delta_1s).date() > day: pass # whole day
+	elif ts0.date() == day and ts1.date() == day: tk = 'span'
+	elif (ts0 - delta_1s).date() == day: tk = 'from'
+	elif (ts1 + delta_1s).date() == day: tk = 'until'
+
+	ts = conv_ts_local(ts_now) # for correct ts.date()
+	if tk == 'fixed':
+		delta, day_ts = ts0 - ts, ts0.strftime('%H:%M')
+	elif tk == 'span':
+		day_ts = ts0.strftime('%H:%M') + '-' + ts1.strftime('%H:%M')
+		delta = (ts1 - ts) if ts > ts1 else (
+			(dt.timedelta(0) if ts > ts0 else (ts0 - ts)) )
+	elif tk == 'from':
+		day_ts = 'from ' + ts0.strftime('%H:%M')
+		delta = dt.timedelta(0) if ts > ts0 else (ts0 - ts)
+	elif tk == 'until':
+		day_ts = 'until ' + ts1.strftime('%H:%M')
+		delta = ( (ts1 - ts) if ts > ts1 else
+			((ts0 - ts) if ts < ts0 else dt.timedelta(0)) )
+	else:
+		day_ts = None
+		delta = ( dt.timedelta(0) if ts.date() == day
+			else ((ts0 - ts) if ts < ts0 else (ts - ts1)) )
+
+	return day_ts, tk, delta
+
+def conky_eta_color(delta, cc):
+	s = delta.total_seconds()
+	if s < 0: return cc.c_eta_pass
+	if s > 24 * 3600: return cc.c_eta_day
+	k = None
+	for n in range(24, 0, -1):
+		k_new = f'c_eta_{n}'
+		if k_new not in cc: continue
+		if s <= n * 3600: k = k_new
+		else: break
+	return cc.get(k) or ''
+
+def conky_config_gen(dst, ts_now, day0, day1, events, conky_params):
+	day, cc, lines, delta_dedup = day0, adict(conky_params), 0, set()
 	cc.max_text_lines = int(cc.max_text_lines) - 1
 	while day < day1:
 		day_events = list()
 		for ts0, ts1, title in events:
 			if not ts0.date() <= day <= ts1.date(): continue
-			day_ts = None
-			if ts0 == ts1 or (ts1 - ts0).total_seconds() < 3*60:
-				if not ts0.hour == ts0.minute == 0: tk, day_ts = 'fixed', ts0.strftime('%H:%M')
-			elif ts0.date() < day and ts1.date() > day: pass # whole day
-			elif ts0.date() == day and ts1.date() == day:
-				tk, day_ts = 'span', ts0.strftime('%H:%M') + '-' + ts1.strftime('%H:%M')
-			elif (ts0 - delta_1s).date() == day: tk, day_ts = 'from', 'from '+ts0.strftime('%H:%M')
-			elif (ts1 + delta_1s).date() == day: tk, day_ts = 'until', 'until '+ts1.strftime('%H:%M')
-			day_events.append((day_ts, title))
+			day_ts, tk, delta = conky_event_time_repr(ts_now, day, ts0, ts1)
+			day_events.append((day_ts, tk, delta, title))
+
 		if day_events and lines <= cc.max_text_lines:
 			if lines:
 				dst.write(
@@ -493,12 +549,18 @@ def generate_conky_config(dst, day0, day1, events, conky_params):
 			dst.write(day.strftime(
 				f'${{goto {cc.pos_weekday}}}${{color {cc.c_weekday}}}%a${{color}}'
 				f'${{goto {cc.pos_date}}}${{color {cc.c_date}}}%Y-%m-%d${{color}}' ))
-			for day_ts, title in day_events:
+
+			for day_ts, tk, delta, title in day_events:
 				if lines > cc.max_text_lines: continue
 				if day_ts:
-					ofset = cc[f'pos_time_{tk}']
-					dst.write( f'${{goto {ofset}}}'
+					pos = cc[f'pos_time_{tk}']
+					dst.write( f'${{goto {pos}}}'
 						f'${{color {cc.c_time}}}{day_ts}${{color {cc.color}}}' )
+				if title not in delta_dedup:
+					delta_dedup.add(title)
+					delta_str = repr_ts_diff( delta,
+						ext=None if delta.total_seconds() >= 0 else 'ago' )
+					title += f'${{alignr}}${{color {conky_eta_color(delta, cc)}}}[ {delta_str} ]'
 				dst.write( f'${{goto {cc.pos_title}}}'
 					f'${{color {cc.c_title}}}{title}${{color {cc.color}}}' )
 				if lines == cc.max_text_lines:
@@ -506,15 +568,14 @@ def generate_conky_config(dst, day0, day1, events, conky_params):
 						f'{cc.max_text_break}${{color {cc.color}}}' )
 				lines += 1
 				dst.write('\n')
+
 		day += delta_1d
 
+
+
+### CLI
+
 def main(args=None):
-	conky_params_default = dict(
-		max_text_lines=9, max_text_break='${alignr}[more]', max_text_color='d9374c',
-		color='', line_color='aaa', line_pos=-9, line_step=1, line_w=1,
-		c_weekday='lightgray', c_date='gray', c_time='lightgray', c_title='',
-		pos_weekday=65, pos_date=0, pos_title=170,
-		pos_time_fixed=110, pos_time_span=100, pos_time_from=100, pos_time_until=100 )
 	conky_params_default_str = ' '.join(f'{c}={o}' for c, o in conky_params_default.items())
 
 	import argparse, textwrap
@@ -562,16 +623,18 @@ def main(args=None):
 	group = parser.add_argument_group('Event filtering')
 	group.add_argument('-e', '--event', metavar='title-part',
 		help='Only match event(s) with specified part (case-insensitive) included in the title.')
-	group.add_argument('-t', '--timespan', metavar='delta', default='1mo',
-		help='Time delta from now to generate calendar entries for. Default: %(default)s')
+	group.add_argument('-s', '--time-start', metavar='time', default='00:00',
+		help='Time to use as a min cutoff point,'
+			' i.e. disregard anything that is passed by it. Default: %(default)s')
+	group.add_argument('-l', '--time-span', metavar='delta', default='1mo',
+		help='Time delta from -s/--time-start to generate calendar entries for. Default: %(default)s')
 
 	group = parser.add_argument_group('Misc options')
 	group.add_argument('--debug', action='store_true', help='Verbose operation mode.')
 
 	opts = parser.parse_args(sys.argv[1:] if args is None else args)
 
-	logging.basicConfig( datefmt='%Y-%m-%d %H:%M:%S',
-		# format='%(asctime)s :: %(name)s %(levelname)s :: %(message)s',
+	logging.basicConfig(
 		format='%(levelname)s :: %(message)s',
 		level=logging.DEBUG if opts.debug else logging.WARNING )
 
@@ -579,9 +642,9 @@ def main(args=None):
 			if not opts.rst_file or opts.rst_file == '-' else opts.rst_file ) as src:
 		doc_text = src.read()
 
-	ts_now = dt.datetime.utcnow().replace(tzinfo=pytz.utc)
-	ts_max = ts_now + parse_duration(opts.timespan)
-	ts0_cache_mock = ts_now - dt.timedelta(1) # XXX: per-entry cache
+	ts_min = conv_ts_utc(parse_ts(opts.time_start, in_future=False))
+	ts_max = ts_min + parse_duration(opts.time_span)
+	ts0_cache_mock = ts_min - delta_1d # XXX: per-entry cache
 
 	if opts.ical:
 		import icalendar as ic # https://tools.ietf.org/html/rfc5545
@@ -605,7 +668,7 @@ def main(args=None):
 		if opts.event and opts.event.lower() not in cal.title.lower(): continue
 
 		ts_list, ts0, ts1 = cal.ts, cal.ts_start, cal.ts_end
-		ts0, ts1 = map(normalize_ts, [ts0, ts1])
+		ts0, ts1 = map(conv_ts_utc, [ts0, ts1])
 		if ts1 and ts1 < ts0: ts1 = ts1.replace(year=ts1.year + 1)
 		ts0_cache = ts0_cache_mock if not ts0 else None
 		for ts in ts_list:
@@ -613,40 +676,49 @@ def main(args=None):
 				if ts0 and ts1:
 					log.warning( 'Ignoring fixed-time "ts" field for entry,'
 						' as "ts-start"/"ts-end" are used instead: {!r} [{}]', cal.title, ts )
-				elif not ts0: ts0 = normalize_ts(ts)
+				elif not ts0: ts0 = conv_ts_utc(ts)
 			else:
-				if not ts0: ts0 = ts0_cache or ts_now
+				if not ts0: ts0 = ts0_cache or ts_min
 				if ts1 and ts0 > ts1: # event ending in the past
 					ts0 = None
 					break
 				try:
-					while ts0 < ts_now: ts0 = apply_ts_delta(ts0, ts, ts_max)
+					while ts0 < ts_min: ts0 = apply_ts_delta(ts0, ts, ts_max)
 				except TSOverflow: # no events within timespan
 					ts0 = None
 					break
+				if isinstance(ts, IntervalFilter) and not ts.time: # day spans
+					ts1 = ts0
+					while True: # iterate until span ends
+						try: ts1_next = apply_ts_delta(ts1, ts, ts_max)
+						except TSOverflow: break
+						if ts1_next != ts1 + delta_1d: break
+						ts1 = ts1_next
+					ts1 += delta_1d - delta_1s # extend until end of last day
+
 		if not ts0: continue
 		if not ts1:
 			ts1 = ts0
 			if cal.duration: ts1 += cal.duration
-		if ts1 < ts_now or ts0 > ts_max: continue
-		loc_ts0, loc_ts1 = map(localize_ts, [ts0, ts1])
+		if ts1 < ts_min or ts0 > ts_max: continue
+		loc_ts0, loc_ts1 = map(conv_ts_local, [ts0, ts1])
 
 		log.debug('----- title: {}', cal.title)
-		log.debug('  cache: {}', localize_ts(ts0_cache))
+		log.debug('  cache: {}', repr_ts(ts0_cache))
 		log.debug('  raw:   {} {} {}', cal.raw_ts, cal.raw_ts_start, cal.raw_ts_end)
 		log.debug('  result [{}]:', repr_ts_diff(ts1 - ts0))
-		log.debug('    from: {} {}', weekday_names[ts0.weekday()], loc_ts0)
-		log.debug('    to:   {} {}', weekday_names[ts0.weekday()], loc_ts1)
+		log.debug('    from: {}', repr_ts(loc_ts0))
+		log.debug('    to:   {}', repr_ts(loc_ts1))
 
 		if opts.ical:
 			ev = ic.Event()
 			ev.add('summary', cal.title)
-			ev.add('dtstart', localize_ts(ts0))
-			ev.add('dtend', localize_ts(ts1))
-			ev.add('dtstamp', localize_ts(ts_now))
+			ev.add('dtstart', conv_ts_local(ts0))
+			ev.add('dtend', conv_ts_local(ts1))
+			ev.add('dtstamp', conv_ts_local(ts_min))
 			if cal.get('url'): ev.add('url', cal.url)
 			ical.add_component(ev)
-		if opts.conky: conky.append((loc_ts0, loc_ts1, cal.title))
+		if opts.conky: conky.append(ConkyEvent(loc_ts0, loc_ts1, cal.title))
 
 	if opts.ical:
 		if ev:
@@ -654,13 +726,15 @@ def main(args=None):
 			dst_stream = ( open(sys.stdout.fileno(), 'wb')
 				if opts.ical == '-' else safe_replacement(opts.ical) )
 			with dst_stream as dst: dst.write(ical.to_ical())
-		else: log.debug('No calendar entries within timespan, skipping icalendar generation')
+		else: log.debug('No calendar entries within timespan, skipping ICS generation')
 
 	if opts.conky:
 		log.debug('Generating conky configuration snippet...')
-		day0, day1 = localize_ts(ts_now).date(), localize_ts(ts_max).date()
+		ts_now = dt.datetime.utcnow().replace(tzinfo=pytz.utc)
+		day0, day1 = conv_ts_local(ts_min).date(), conv_ts_local(ts_max).date()
 		dst_stream = ( open(sys.stdout.fileno(), 'w')
 			if opts.conky == '-' else safe_replacement(opts.conky) )
-		with dst_stream as dst: generate_conky_config(dst, day0, day1, conky, conky_params)
+		with dst_stream as dst:
+			conky_config_gen(dst, ts_now, day0, day1, conky, conky_params)
 
 if __name__ == '__main__': sys.exit(main())
