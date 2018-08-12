@@ -3,14 +3,10 @@
 import itertools as it, operator as op, functools as ft
 import os, sys, logging, re, time, math, subprocess
 import datetime as dt, collections as cs
+import contextlib, tempfile, stat
 
 import docutils, pytz
 
-
-class adict(dict):
-	def __init__(self, *args, **kwargs):
-		super().__init__(*args, **kwargs)
-		self.__dict__ = self
 
 class LogMessage(object):
 	def __init__(self, fmt, a, k): self.fmt, self.a, self.k = fmt, a, k
@@ -27,6 +23,30 @@ class LogStyleAdapter(logging.LoggerAdapter):
 
 get_logger = lambda name: LogStyleAdapter(logging.getLogger(name))
 log = get_logger('main')
+
+class adict(dict):
+	def __init__(self, *args, **kwargs):
+		super().__init__(*args, **kwargs)
+		self.__dict__ = self
+
+@contextlib.contextmanager
+def safe_replacement(path, *open_args, mode=None, **open_kws):
+	path = str(path)
+	if mode is None:
+		try: mode = stat.S_IMODE(os.lstat(path).st_mode)
+		except OSError: pass
+	open_kws.update( delete=False,
+		dir=os.path.dirname(path), prefix=os.path.basename(path)+'.' )
+	if not open_args: open_kws['mode'] = 'w'
+	with tempfile.NamedTemporaryFile(*open_args, **open_kws) as tmp:
+		try:
+			if mode is not None: os.fchmod(tmp.fileno(), mode)
+			yield tmp
+			if not tmp.closed: tmp.flush()
+			os.rename(tmp.name, path)
+		finally:
+			try: os.unlink(tmp.name)
+			except OSError: pass
 
 
 
@@ -447,34 +467,107 @@ def parse_cal_list_from_rst(rst_str):
 
 ### CLI
 
+def generate_conky_config(dst, day0, day1, events, conky_params):
+	day, delta_1s, delta_1d = day0, dt.timedelta(seconds=1), dt.timedelta(days=1)
+	cc, lines = adict(conky_params), 0
+	cc.max_text_lines = int(cc.max_text_lines) - 1
+	while day < day1:
+		day_events = list()
+		for ts0, ts1, title in events:
+			if not ts0.date() <= day <= ts1.date(): continue
+			day_ts = None
+			if ts0 == ts1 or (ts1 - ts0).total_seconds() < 3*60:
+				if not ts0.hour == ts0.minute == 0: tk, day_ts = 'fixed', ts0.strftime('%H:%M')
+			elif ts0.date() < day and ts1.date() > day: pass # whole day
+			elif ts0.date() == day and ts1.date() == day:
+				tk, day_ts = 'span', ts0.strftime('%H:%M') + '-' + ts1.strftime('%H:%M')
+			elif (ts0 - delta_1s).date() == day: tk, day_ts = 'from', 'from '+ts0.strftime('%H:%M')
+			elif (ts1 + delta_1s).date() == day: tk, day_ts = 'until', 'until '+ts1.strftime('%H:%M')
+			day_events.append((day_ts, title))
+		if day_events and lines <= cc.max_text_lines:
+			if lines:
+				dst.write(
+					f'${{color {cc.line_color}}}${{voffset {cc.line_pos}}}'
+					f'${{stippled_hr {cc.line_step} {cc.line_w}}}'
+					f'${{voffset {-int(cc.line_pos)}}}${{color {cc.color}}}' )
+			dst.write(day.strftime(
+				f'${{goto {cc.pos_weekday}}}${{color {cc.c_weekday}}}%a${{color}}'
+				f'${{goto {cc.pos_date}}}${{color {cc.c_date}}}%Y-%m-%d${{color}}' ))
+			for day_ts, title in day_events:
+				if lines > cc.max_text_lines: continue
+				if day_ts:
+					ofset = cc[f'pos_time_{tk}']
+					dst.write( f'${{goto {ofset}}}'
+						f'${{color {cc.c_time}}}{day_ts}${{color {cc.color}}}' )
+				dst.write( f'${{goto {cc.pos_title}}}'
+					f'${{color {cc.c_title}}}{title}${{color {cc.color}}}' )
+				if lines == cc.max_text_lines:
+					dst.write( f' ${{color {cc.max_text_color}}}'
+						f'{cc.max_text_break}${{color {cc.color}}}' )
+				lines += 1
+				dst.write('\n')
+		day += delta_1d
+
 def main(args=None):
+	conky_params_default = dict(
+		max_text_lines=9, max_text_break='${alignr}[more]', max_text_color='d9374c',
+		color='', line_color='aaa', line_pos=-9, line_step=1, line_w=1,
+		c_weekday='lightgray', c_date='gray', c_time='lightgray', c_title='',
+		pos_weekday=65, pos_date=0, pos_title=170,
+		pos_time_fixed=110, pos_time_span=100, pos_time_from=100, pos_time_until=100 )
+	conky_params_default_str = ' '.join(f'{c}={o}' for c, o in conky_params_default.items())
+
 	import argparse, textwrap
 
 	dedent = lambda text: (textwrap.dedent(text).strip('\n') + '\n').replace('\t', '  ')
+	text_fill = lambda s,w=100,ind='\t',**k: textwrap.fill(
+		s, w, initial_indent=ind, subsequent_indent=ind, **k )
 	class SmartHelpFormatter(argparse.HelpFormatter):
 		def __init__(self, *args, **kws):
 			return super().__init__(*args, **kws, width=100)
 		def _fill_text(self, text, width, indent):
 			if '\n' not in text: return super()._fill_text(text, width, indent)
-			return ''.join(indent + line for line in text.splitlines(keepends=True))
+			return ''.join( indent + line
+				for line in text.replace('\t', '  ').splitlines(keepends=True) )
 		def _split_lines(self, text, width):
 			return super()._split_lines(text, width)\
 				if '\n' not in text else dedent(text).splitlines()
 
 	parser = argparse.ArgumentParser(
+		formatter_class=SmartHelpFormatter,
 		description='ReST-based calendar parser and online event tracker.')
-	parser.add_argument('rst_file', nargs='?',
-		help='ReST (.rst) file with calendar and event descriptions.'
-			' Will be read from stdin, if "-" or not specified.')
-	parser.add_argument('-i', '--ical', metavar='path',
-		help='Generate ICS (icalendar) output file at specified path.'
-			' "-" can be unsed instead of path to output to stdout instead.')
-	# parser.add_argument('-c', '--cache', metavar='path', help='Path to cache file.')
-	parser.add_argument('-e', '--event', metavar='title-part',
+
+	group = parser.add_argument_group('Input/output options')
+	group.add_argument('rst_file', nargs='?',
+		help='''
+			ReST (.rst) file with calendar and event descriptions.
+			Will be read from stdin, if "-" or not specified.''')
+	group.add_argument('-i', '--ical', metavar='path',
+		help='''
+			Generate ICS (icalendar) output file at specified path.
+			"-" can be unsed instead of path to output to stdout instead.''')
+	group.add_argument('-c', '--conky', metavar='path',
+		help='''
+			Generate conky configuration snippet for e.g. execi or catp include/command.
+			 "-" can be unsed instead of path to output to stdout instead.''')
+	group.add_argument('-w', '--conky-params',
+		metavar='col=offset,color=value,...', default=conky_params_default_str,
+		help='''
+			Various conky parameters in calendar table generated by -c/--conky option.
+			Overrides for one or more values can be specified in any order,
+				separated by commas and/or spaces.
+			Default offsets are:\n{}.'''.format(
+				text_fill(conky_params_default_str, len(conky_params_default_str) // 2 + 5, '\t'*4) ))
+
+	group = parser.add_argument_group('Event filtering')
+	group.add_argument('-e', '--event', metavar='title-part',
 		help='Only match event(s) with specified part (case-insensitive) included in the title.')
-	parser.add_argument('-t', '--timespan', metavar='delta', default='1mo',
+	group.add_argument('-t', '--timespan', metavar='delta', default='1mo',
 		help='Time delta from now to generate calendar entries for. Default: %(default)s')
-	parser.add_argument('--debug', action='store_true', help='Verbose operation mode.')
+
+	group = parser.add_argument_group('Misc options')
+	group.add_argument('--debug', action='store_true', help='Verbose operation mode.')
+
 	opts = parser.parse_args(sys.argv[1:] if args is None else args)
 
 	logging.basicConfig( datefmt='%Y-%m-%d %H:%M:%S',
@@ -495,6 +588,17 @@ def main(args=None):
 		ical, ev = ic.Calendar(), None
 		ical.add('prodid', '-//rst-icalendar-event-tracker//fraggod.net//EN')
 		ical.add('version', '2.0')
+	if opts.conky:
+		conky, conky_params = list(), conky_params_default.copy()
+		if opts.conky_params:
+			for spec in it.chain.from_iterable(
+					col.strip().split() for col in opts.conky_params.split(',') ):
+				try:
+					k, v = spec.split('=', 1)
+					if k not in conky_params: raise ValueError(k)
+					conky_params[k] = v
+				except ValueError:
+					parser.error(f'Invalid column/width spec: {spec!r}')
 
 	cal_list = parse_cal_list_from_rst(doc_text)
 	for cal in map(adict, cal_list):
@@ -525,13 +629,14 @@ def main(args=None):
 			ts1 = ts0
 			if cal.duration: ts1 += cal.duration
 		if ts1 < ts_now or ts0 > ts_max: continue
+		loc_ts0, loc_ts1 = map(localize_ts, [ts0, ts1])
 
 		log.debug('----- title: {}', cal.title)
 		log.debug('  cache: {}', localize_ts(ts0_cache))
 		log.debug('  raw:   {} {} {}', cal.raw_ts, cal.raw_ts_start, cal.raw_ts_end)
 		log.debug('  result [{}]:', repr_ts_diff(ts1 - ts0))
-		log.debug('    from: {} {}', weekday_names[ts0.weekday()], localize_ts(ts0))
-		log.debug('    to:   {} {}', weekday_names[ts0.weekday()], localize_ts(ts1))
+		log.debug('    from: {} {}', weekday_names[ts0.weekday()], loc_ts0)
+		log.debug('    to:   {} {}', weekday_names[ts0.weekday()], loc_ts1)
 
 		if opts.ical:
 			ev = ic.Event()
@@ -541,12 +646,21 @@ def main(args=None):
 			ev.add('dtstamp', localize_ts(ts_now))
 			if cal.get('url'): ev.add('url', cal.url)
 			ical.add_component(ev)
+		if opts.conky: conky.append((loc_ts0, loc_ts1, cal.title))
 
 	if opts.ical:
 		if ev:
 			log.debug('Generating resulting ICS file...')
-			with open(sys.stdout.fileno() if opts.ical == '-' else opts.ical, 'wb') as src:
-				src.write(ical.to_ical())
+			dst_stream = ( open(sys.stdout.fileno(), 'wb')
+				if opts.ical == '-' else safe_replacement(opts.ical) )
+			with dst_stream as dst: dst.write(ical.to_ical())
 		else: log.debug('No calendar entries within timespan, skipping icalendar generation')
+
+	if opts.conky:
+		log.debug('Generating conky configuration snippet...')
+		day0, day1 = localize_ts(ts_now).date(), localize_ts(ts_max).date()
+		dst_stream = ( open(sys.stdout.fileno(), 'w')
+			if opts.conky == '-' else safe_replacement(opts.conky) )
+		with dst_stream as dst: generate_conky_config(dst, day0, day1, conky, conky_params)
 
 if __name__ == '__main__': sys.exit(main())
