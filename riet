@@ -755,15 +755,20 @@ def main(args=None):
 	ts_max = ts_min + parse_duration(opts.time_span)
 	cal_list = parse_cal_list_from_rst(rst_text)
 
+	# Loop: cal_list (events) -> ts_list (ts0-ts1 pairs)
 	for cal in map(adict, cal_list):
 		if opts.event and opts.event.lower() not in cal.title.lower(): continue
 
 		ts_list, ts0, ts1, ts_hashes = cal.ts, cal.ts_start, cal.ts_end, set()
 		ts0, ts1 = map(conv_ts_utc, [ts0, ts1])
 		if ts1 and ts1 < ts0: ts1 = ts1.replace(year=ts1.year + 1)
-		for ts in ts_list:
+		if not ts_list: ts_list = [ts0]
+		ts_base = ts0, ts1
+
+		for n, ts in enumerate(ts_list):
+			(ts0, ts1), ts_list[n] = ts_base, None
 			if isinstance(ts, dt.datetime):
-				if ts0 and ts1:
+				if ts0 and ts1 and ts != ts0:
 					log.warning( 'Ignoring fixed-time "ts" field for entry,'
 						' as "ts-start"/"ts-end" are used instead: {!r} [{}]', cal.title, ts )
 				elif not ts0: ts0 = conv_ts_utc(ts)
@@ -790,32 +795,39 @@ def main(args=None):
 						ts1 = ts1_next
 					ts1 += delta_1d - delta_1s # extend until end of last day
 
-		if not ts0: continue
-		if not ts1:
-			ts1 = ts0
-			if cal.duration: ts1 += cal.duration
-		if ts1 < ts_min or ts0 > ts_max: continue
-		loc_ts0, loc_ts1 = map(conv_ts_local, [ts0, ts1])
+			if not ts0: continue
+			if not ts1:
+				ts1 = ts0
+				if cal.duration: ts1 += cal.duration
+			if ts1 < ts_min or ts0 > ts_max: continue
+			ts_list[n] = ts0, ts1
 
-		log.debug('')
-		log.debug('----- title: {}', cal.title)
-		log.debug('  raw: ts={} start={} end={}', cal.raw_ts, cal.raw_ts_start, cal.raw_ts_end)
-		if ts_hashes: log.debug('  hashes: {}', ' '.join(sorted(ts_hashes)))
-		log.debug('  result [{}]:', repr_ts_diff(ts1 - ts0))
-		log.debug('    from: {}', repr_ts(loc_ts0))
-		log.debug('    to:   {}', repr_ts(loc_ts1))
-		urls = cal.get('url', list()) + cal.get('feed_rss', list())
-		for url in urls: log.debug('  url: {}', url)
+		ts_list = list(filter(None, ts_list))
 
-		if opts.ical:
-			ev = ic.Event()
-			ev.add('summary', cal.title)
-			ev.add('dtstart', conv_ts_local(ts0))
-			ev.add('dtend', conv_ts_local(ts1))
-			ev.add('dtstamp', conv_ts_local(ts_min))
-			if cal.get('url'): ev.add('url', cal.url)
-			ical.add_component(ev)
-		if opts.conky: conky.append(ConkyEvent(loc_ts0, loc_ts1, cal))
+		if log.isEnabledFor(logging.DEBUG):
+			log.debug('')
+			log.debug('----- title: {}', cal.title)
+			log.debug('  raw: ts={} start={} end={}', cal.raw_ts, cal.raw_ts_start, cal.raw_ts_end)
+			if ts_hashes: log.debug('  hashes: {}', ' '.join(sorted(ts_hashes)))
+			for ts0, ts1 in ts_list:
+				log.debug('  result [{}]:', repr_ts_diff(ts1 - ts0))
+				log.debug('    from: {}', repr_ts(ts0))
+				log.debug('    to:   {}', repr_ts(ts1))
+			urls = cal.get('url', list()) + cal.get('feed_rss', list())
+			for url in urls: log.debug('  url: {}', url)
+
+		for ts0, ts1 in ts_list:
+			if opts.ical:
+				ev = ic.Event()
+				ev.add('summary', cal.title)
+				ev.add('dtstart', conv_ts_local(ts0))
+				ev.add('dtend', conv_ts_local(ts1))
+				ev.add('dtstamp', conv_ts_local(ts_min))
+				if cal.get('url'): ev.add('url', cal.url)
+				ical.add_component(ev)
+			if opts.conky:
+				conky.append(ConkyEvent(
+					conv_ts_local(ts0), conv_ts_local(ts1), cal ))
 
 	if opts.ical:
 		if ev:

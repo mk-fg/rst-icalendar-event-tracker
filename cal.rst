@@ -52,6 +52,13 @@ Kept in the head of the doc, as stuff is added and removed here all the time.
 
   See more examples for all these below.
 
+- Multiple appointments for same thing
+
+  :ts: Tue 2018-08-14 19:15
+  :ts: Thu 2018-08-16 13:00
+  :ts: Sat 2018-08-18 15:30
+
+
 
 Simple recurring events
 -----------------------
