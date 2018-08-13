@@ -103,3 +103,13 @@ Requirements
 * `docutils module <https://docutils.readthedocs.io/>`_ - rst parser.
 * `pytz <http://pytz.sourceforge.net/>`_ - parsing timezones, also a dep for icalendar.
 * `icalendar module <https://pypi.org/project/icalendar/>`_ - only when generating .ics files with -i/--ical option.
+
+
+TODO
+----
+
+- Recurring URL and RSS feed update checks,
+  showing events from items with these only after updates,
+  with titles derived from such updates.
+
+- Maybe some auto-cleanup for passed one-off entries in rst file?
