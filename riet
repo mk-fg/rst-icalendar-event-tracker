@@ -780,7 +780,7 @@ def main(args=None):
 
 	ts_min = conv_ts_utc(parse_ts(opts.time_start, in_future=False))
 	ts_max = ts_min + parse_duration(opts.time_span)
-	cal_list = parse_cal_list_from_rst(rst_text)
+	cal_list = parse_cal_list_from_rst(rst_text.replace('\t', '  '))
 
 	# Loop: cal_list (events) -> ts_list (ts0-ts1 pairs)
 	for cal in map(adict, cal_list):
