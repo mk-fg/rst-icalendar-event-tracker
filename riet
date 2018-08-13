@@ -236,6 +236,10 @@ def parse_duration(ts_str):
 		delta.append(val)
 	return dt.timedelta(*delta)
 
+def parse_ts_or_interval(ts_str):
+	m = re.search(r'(?i)^every\s+(.*)', ts_str)
+	return parse_ts(ts_str) if not m else parse_ts_interval(m.group(1))
+
 def parse_ts(ts_str, in_future=True):
 	assert isinstance(ts_str, str), [type(ts_str), repr(ts_str)]
 	ts = None
@@ -257,7 +261,8 @@ def parse_ts(ts_str, in_future=True):
 		# coreutils' "date" parses virtually everything, but is more expensive to use
 		ts_ext = [ts_str]
 		while True:
-			res = subprocess.run( ['date', '+%s', '-d', ' '.join(ts_ext)],
+			ts_str_ext = ' '.join(ts_ext)
+			res = subprocess.run( ['date', '+%s', '-d', ts_str_ext],
 					stdout=subprocess.PIPE, stderr=subprocess.DEVNULL )
 			if not res.returncode:
 				val = int(res.stdout.strip())
@@ -270,6 +275,10 @@ def parse_ts(ts_str, in_future=True):
 				ts = dt.datetime.fromtimestamp(val) # note: naive dt in local tz
 				if ( in_future and 0 < time.time() - val <= 365*24*3600
 					and not re.search(r'\b\d{4}\b', ts_str) ): ts = ts.replace(year=ts.year+1)
+			elif ',' in ts_str_ext:
+				# "date -d" seem to have issues with commas, but removing them works
+				ts_ext = list(str(v).replace(',', ' ') for v in ts_ext)
+				continue
 			break
 	if ts: return ts
 	raise TSParseError(ts_str)
@@ -491,9 +500,7 @@ def parse_cal_list_from_rst(rst_str):
 			for ts in ts_str_list:
 				ts = ts_str_norm(ts)
 				if not ts: continue
-				m = re.search(r'^every\s+(.*)', ts)
-				res['ts'].append( parse_ts(ts)
-					if not m else parse_ts_interval(m.group(1)) )
+				res['ts'].append(parse_ts_or_interval(ts))
 		else: res['ts'] = res['raw_ts'] = list()
 		for k in 'ts_start', 'ts_end', 'duration':
 			k_raw = f'raw_{k}'
@@ -655,8 +662,8 @@ def main(args=None):
 	import argparse, textwrap
 
 	dedent = lambda text: (textwrap.dedent(text).strip('\n') + '\n').replace('\t', '  ')
-	text_fill = lambda s,w=100,ind='\t',**k: textwrap.fill(
-		s, w, initial_indent=ind, subsequent_indent=ind, **k )
+	text_fill = lambda s,w=100,ind='\t',ind_next=None,**k: textwrap.fill(
+		s, w, initial_indent=ind, subsequent_indent=ind if ind_next is None else ind_next, **k )
 	class SmartHelpFormatter(argparse.HelpFormatter):
 		def __init__(self, *args, **kws):
 			return super().__init__(*args, **kws, width=100)
@@ -704,7 +711,7 @@ def main(args=None):
 	group.add_argument('-l', '--time-span', metavar='delta', default='1mo',
 		help='Time delta from -s/--time-start to generate calendar entries for. Default: %(default)s')
 
-	group = parser.add_argument_group('Misc options')
+	group = parser.add_argument_group('State tracking')
 	group.add_argument('-d', '--state-file',
 		metavar='path-tpl', default='/var/tmp/riet/src.{hash}.json',
 		help='''
@@ -717,6 +724,13 @@ def main(args=None):
 		action='store_true', help='Discard any existing --state-file data.')
 	group.add_argument('--state-preserve',
 		action='store_true', help='Read/use, but do not update --state-file data.')
+
+	group = parser.add_argument_group('Misc options')
+	group.add_argument('-t', '--test-parse', metavar='( date/time | key=value )',
+		help='''
+			Test parsing specified date/time string, print resulting value and exit.
+			Optionally, key=value entry can be specified, with one of the following
+				keys (corresponding to ones in rst items): ts, ts-start, ts-end, duration.''')
 	group.add_argument('--debug', action='store_true', help='Verbose operation mode.')
 
 	opts = parser.parse_args(sys.argv[1:] if args is None else args)
@@ -724,6 +738,19 @@ def main(args=None):
 	logging.basicConfig(
 		format='%(levelname)s :: %(message)s',
 		level=logging.DEBUG if opts.debug else logging.WARNING )
+
+	if opts.test_parse:
+		key, value = 'ts', opts.test_parse
+		if '=' in value: key, value = value.split('=', 1)
+		parser = dict( ts=parse_ts_or_interval, ts_start=parse_ts,
+			ts_end=parse_ts, duration=parse_duration )[key.replace('-', '_').lower()]
+		res = parser(value)
+		res = ( repr_ts(res) if isinstance(res, dt.datetime)
+			else str(res).replace('datetime.', '').replace('timedelta(', 'td(') )
+		if len(res) > 50: res = '\n' + text_fill(res, len(res) / 2 + 5, ' '*2, ' '*4)
+		print(f'Raw value: {value!r}')
+		print(f'Parsed value (field={key}): {res}')
+		return
 
 	rst_stdin, rst_path = not opts.rst_file or opts.rst_file == '-', pl.Path(opts.rst_file)
 	with open(sys.stdin.fileno() if rst_stdin else rst_path) as src: rst_text = src.read()
