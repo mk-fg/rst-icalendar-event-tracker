@@ -77,13 +77,16 @@ Stuff that happens every day/week/month/year.
 - Weekend Days
 
   :ts: every sat-sun
+  :conky: c_title=green
 
   | Note: "every <weekday>-<weekday>" spec, adding recurring event interval.
+  | Note: ``:conky:`` key allows to override any -o/--conky-params per-item.
 
 - New Year Bank Holidays
 
   :ts-start: Jan 1
   :ts-end: Jan 10
+  :conky: c_title=green
 
   | Note: ts start/end interval spec for event instead of one fixed time.
   | Note: start/end times can only be one-off, not "every X".
@@ -93,12 +96,14 @@ Stuff that happens every day/week/month/year.
   :ts-start: Jan 1
   :ts-end: Jan 10
   :ts: every mon-fri
+  :conky: c_title=gray
 
   | Note: same as above, but only matches mon-fri weekdays within that interval.
 
 - Midnight on every Friday the 13th
 
-  :ts: every 13th fri at 00:00
+  :ts: every 13th fri at midnight
+  :conky: c_title=red c_date=red c_time=red c_weekday=red
 
 
 

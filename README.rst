@@ -86,10 +86,10 @@ Usage
 
 - Observe:
 
-  .. https://raw.githubusercontent.com/mk-fg/rst-icalendar-event-tracker/master/example.conky-calendar.jpg
-
   .. figure:: https://mk-fg.github.io/rst-icalendar-event-tracker/example.conky-calendar.jpg
      :alt: example.conky-calendar.jpg
+
+  .. https://raw.githubusercontent.com/mk-fg/rst-icalendar-event-tracker/master/example.conky-calendar.jpg
 
 - Put "riet" invocation into crontab to update that calendar section occasionally.
 
