@@ -2,10 +2,11 @@
 
 import itertools as it, operator as op, functools as ft
 import os, sys, logging, re, time, math, subprocess
-import datetime as dt, collections as cs
-import contextlib, tempfile, stat
+import datetime as dt, collections as cs, pathlib as pl
+import contextlib, tempfile, stat, base64, hashlib, json
 
-import docutils, pytz
+import pytz
+# As-needed deps: docutils, icalendar
 
 
 class LogMessage(object):
@@ -47,6 +48,40 @@ def safe_replacement(path, *open_args, mode=None, **open_kws):
 		finally:
 			try: os.unlink(tmp.name)
 			except OSError: pass
+
+class CacheDict(cs.UserDict):
+	@classmethod
+	def init_data(cls, state):
+		self = cls()
+		self.data = state
+		return self
+	def __setitem__(self, k, v):
+		return super().__setitem__(k, (time.time(), v))
+	def __getitem__(self, k):
+		v = super().__getitem__(k)[1]
+		self[k] = v # update ts
+		return v
+	def cleanup(self, ts_min=None, timeout=2*365*24*3600):
+		if ts_min is None: ts_min = time.time() - timeout
+		for k, v in list(self.data.items()):
+			if v[0] < ts_min: self.data.pop(k)
+
+str_hash = lambda p: base64.urlsafe_b64encode(
+	hashlib.blake2s(str(p).encode(), key=b'riet.path_hash').digest() ).decode()[:12]
+
+def tuple_hash(data):
+	src = list()
+	for v in data:
+		if v is None: src.append('\ue003')
+		elif isinstance(v, (int, str, dt.tzinfo)): src.append(str(v))
+		elif isinstance(v, tuple): src.append(tuple_hash(v))
+		elif isinstance(v, dt.datetime):
+			src.append(conv_ts_utc(v).strftime('%Y-%m-%dT%H:%M:%S.%f'))
+		elif isinstance(v, dt.timedelta): src.append('\ue002{v.total_seconds()}')
+		elif isinstance(v, set): src.append(tuple_hash(sorted(v)))
+		else: raise ValueError(type(v), v)
+	return str_hash('\ue000'.join(
+		'\ue001{}\ue001'.format(v.replace('\ue001', '\ue001'*2)) for v in src ))
 
 
 
@@ -161,7 +196,8 @@ get_local_tz.cache = None
 
 def conv_ts_utc(ts):
 	'Interpret any naive datetime as local-tz and convert to UTC.'
-	if not ts: return
+	if ts is None: return
+	if isinstance(ts, (int, float)): ts = dt.datetime.fromtimestamp(ts)
 	if not ts.tzinfo: ts = get_local_tz().localize(ts, is_dst=None)
 	return ts.astimezone(pytz.utc)
 
@@ -633,6 +669,18 @@ def main(args=None):
 		help='Time delta from -s/--time-start to generate calendar entries for. Default: %(default)s')
 
 	group = parser.add_argument_group('Misc options')
+	group.add_argument('-d', '--state-file',
+		metavar='path-tpl', default='/var/tmp/riet/src.{hash}.json',
+		help='''
+			Path or template for one, that will be used to store
+					state for when "every X interval" entries were last displayed.
+				"hash" component in the template will be replaced by hash of source rst path.
+				Static path (no "{hash}" thing) must be specified to use with rst from stdin.
+				Can be set to "-" to not track it and recalculate them from --time-start on each run.''')
+	group.add_argument('--state-flush',
+		action='store_true', help='Discard any existing --state-file data.')
+	group.add_argument('--state-preserve',
+		action='store_true', help='Read/use, but do not update --state-file data.')
 	group.add_argument('--debug', action='store_true', help='Verbose operation mode.')
 
 	opts = parser.parse_args(sys.argv[1:] if args is None else args)
@@ -641,13 +689,22 @@ def main(args=None):
 		format='%(levelname)s :: %(message)s',
 		level=logging.DEBUG if opts.debug else logging.WARNING )
 
-	with open( sys.stdin.fileno()
-			if not opts.rst_file or opts.rst_file == '-' else opts.rst_file ) as src:
-		doc_text = src.read()
+	rst_stdin, rst_path = not opts.rst_file or opts.rst_file == '-', pl.Path(opts.rst_file)
+	with open(sys.stdin.fileno() if rst_stdin else rst_path) as src: rst_text = src.read()
 
-	ts_min = conv_ts_utc(parse_ts(opts.time_start, in_future=False))
-	ts_max = ts_min + parse_duration(opts.time_span)
-	ts0_cache_mock = ts_min - delta_1d # XXX: per-entry cache
+	state_path, state = opts.state_file, dict()
+	if '{hash}' in state_path:
+		if rst_stdin: state_path = '-'
+		else: state_path = state_path.format(hash=str_hash(rst_path.resolve()))
+	if state_path == '-': state_path = None
+	if state_path:
+		state_path = pl.Path(state_path).resolve()
+		log.debug('Using state-file path: {}', state_path)
+		state_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+		if state_path.exists():
+			state = json.loads(state_path.read_text())
+	if opts.state_flush: state.clear()
+	state = CacheDict.init_data(state)
 
 	if opts.ical:
 		import icalendar as ic # https://tools.ietf.org/html/rfc5545
@@ -666,14 +723,16 @@ def main(args=None):
 				except ValueError:
 					parser.error(f'Invalid column/width spec: {spec!r}')
 
-	cal_list = parse_cal_list_from_rst(doc_text)
+	ts_min = conv_ts_utc(parse_ts(opts.time_start, in_future=False))
+	ts_max = ts_min + parse_duration(opts.time_span)
+	cal_list = parse_cal_list_from_rst(rst_text)
+
 	for cal in map(adict, cal_list):
 		if opts.event and opts.event.lower() not in cal.title.lower(): continue
 
 		ts_list, ts0, ts1 = cal.ts, cal.ts_start, cal.ts_end
 		ts0, ts1 = map(conv_ts_utc, [ts0, ts1])
 		if ts1 and ts1 < ts0: ts1 = ts1.replace(year=ts1.year + 1)
-		ts0_cache = ts0_cache_mock if not ts0 else None
 		for ts in ts_list:
 			if isinstance(ts, dt.datetime):
 				if ts0 and ts1:
@@ -681,15 +740,17 @@ def main(args=None):
 						' as "ts-start"/"ts-end" are used instead: {!r} [{}]', cal.title, ts )
 				elif not ts0: ts0 = conv_ts_utc(ts)
 			else:
-				if not ts0: ts0 = ts0_cache or ts_min
+				ts0_k = tuple_hash((cal.title, ts0, ts))
+				ts0 = ts0_orig = conv_ts_utc(state.get(ts0_k)) or ts0 or ts_min
 				if ts1 and ts0 > ts1: # event ending in the past
 					ts0 = None
 					break
 				try:
-					while ts0 < ts_min: ts0 = apply_ts_delta(ts0, ts, ts_max)
+					while ts0 <= ts_min: ts0 = apply_ts_delta(ts0, ts, ts_max)
 				except TSOverflow: # no events within timespan
 					ts0 = None
 					break
+				if ts0 != ts0_orig: state[ts0_k] = ts0.timestamp()
 				if isinstance(ts, IntervalFilter) and not ts.time: # day spans
 					ts1 = ts0
 					while True: # iterate until span ends
@@ -707,7 +768,6 @@ def main(args=None):
 		loc_ts0, loc_ts1 = map(conv_ts_local, [ts0, ts1])
 
 		log.debug('----- title: {}', cal.title)
-		log.debug('  cache: {}', repr_ts(ts0_cache))
 		log.debug('  raw:   {} {} {}', cal.raw_ts, cal.raw_ts_start, cal.raw_ts_end)
 		log.debug('  result [{}]:', repr_ts_diff(ts1 - ts0))
 		log.debug('    from: {}', repr_ts(loc_ts0))
@@ -739,5 +799,9 @@ def main(args=None):
 			if opts.conky == '-' else safe_replacement(opts.conky) )
 		with dst_stream as dst:
 			conky_config_gen(dst, ts_now, day0, day1, conky, conky_params)
+
+	if state_path and not opts.state_preserve:
+		state.cleanup(timeout=2*365*24*3600)
+		with safe_replacement(state_path) as dst: json.dump(state.data, dst)
 
 if __name__ == '__main__': sys.exit(main())
