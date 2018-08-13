@@ -292,9 +292,14 @@ def parse_ts_interval(ts_str):
 	# DELTA-DATE-SPEC:
 	#   subset of DELTA-SPEC wrt allowed units
 	#   units: y, yr, year, mo, month, w, week, d, day
-	# WD: see _filter_weekdays abbrevs
+	# WD:
+	#   monday mon, tuesday tu tue tues, wednesday wed,
+	#   thursday th thu thur thurs, friday fri, saturday sat, sunday sun
+	# TZ:
+	#   ( "UTC" | ("+"|"-") HH:MM | region/place | abbrev )
+	#   examples: +05:00, America/Los_Angeles, BST
+	#     (anything that pytz can parse, basically)
 	# TIME: [H]H[:MM[:SS]] ["am"|"pm"]
-	# TZ: ( "UTC" | ("+"|"-") HH:MM | region/place )
 
 	# DELTA-SPEC "interval"
 	m = re.search(r'(?i)^(.*)\binterval$', ts_str)
@@ -785,18 +790,20 @@ def main(args=None):
 
 	if opts.ical:
 		if ev:
-			log.debug('Generating resulting ICS file...')
+			path = str(pl.Path(opts.ical).expanduser())
+			log.debug('Generating resulting ICS file: {}', path)
 			dst_stream = ( open(sys.stdout.fileno(), 'wb')
-				if opts.ical == '-' else safe_replacement(opts.ical) )
+				if path == '-' else safe_replacement(path, 'wb') )
 			with dst_stream as dst: dst.write(ical.to_ical())
 		else: log.debug('No calendar entries within timespan, skipping ICS generation')
 
 	if opts.conky:
-		log.debug('Generating conky configuration snippet...')
+		path = str(pl.Path(opts.conky).expanduser())
+		log.debug('Generating conky configuration snippet: {}', path)
 		ts_now = dt.datetime.utcnow().replace(tzinfo=pytz.utc)
 		day0, day1 = conv_ts_local(ts_min).date(), conv_ts_local(ts_max).date()
 		dst_stream = ( open(sys.stdout.fileno(), 'w')
-			if opts.conky == '-' else safe_replacement(opts.conky) )
+			if path == '-' else safe_replacement(path) )
 		with dst_stream as dst:
 			conky_config_gen(dst, ts_now, day0, day1, conky, conky_params)
 

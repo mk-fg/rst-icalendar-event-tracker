@@ -8,8 +8,48 @@ Kept in the head of the doc, as stuff is added and removed here all the time.
   :ts: 2018-07-20
   :url: https://github.com/mk-fg/rst-icalendar-event-tracker
 
-  .. TODO: note on how dates/times are parsed, examples
+  Notes on date/time format - anything that gets parsed by "date -d"
+  (actually used as a fallback) will work.
 
+  Example above shows iso8601 date, but pretty much any format should do,
+  including standard dates/times around the world, weekdays, random human stuff
+  like "next Mon", "now + 3 hours 30 minutes", "5pm July 29 PDT", etc.
+
+  ``:ts:`` key in particular also accepts special "every ..." spec for recurring
+  events, which is structured as follows::
+
+    EVERY:
+      "every" {
+        [ ( NN[suffix][ "-" MM[suffix]] )+ | DELTA-DATE-SPEC ]
+          [WD[-WD]]+
+          ["at"] [TIME ["[" TZ "]"]]
+        | DELTA-SPEC "interval" }
+      suffix: st, nd, rd, th
+      example: every 1st-11th at 5am UTC
+    DELTA-SPEC:
+      ( N || unit )+
+      units:
+        y, yr, year, mo, month, w, week, d, day,
+        h, hr, hour, m, min, minute, s, sec, second
+      example: 3mo 1d 5hrs 10minutes 30s
+    DELTA-DATE-SPEC:
+      subset of DELTA-SPEC wrt allowed units
+      units: y, yr, year, mo, month, w, week, d, day
+    WD:
+      monday mon, tuesday tu tue tues, wednesday wed,
+      thursday th thu thur thurs, friday fri, saturday sat, sunday sun
+    TZ:
+      ( "UTC" | ("+"|"-") HH:MM | region/place | abbrev )
+      examples: +05:00, America/Los_Angeles, BST
+        (anything that pytz can parse, basically)
+    TIME: [H]H[:MM[:SS]] ["am"|"pm"]
+
+  Gist is that something like "every Friday 13th at 9pm [US/Eastern]",
+  "every Mon-Fri 19:45" or "every 12d interval" will just do what it says,
+  starting any non-specific intervals at either ``:ts-start:`` or first time
+  that event/spec was encountered for that rst (tracked in -d/--state-file).
+
+  See more examples for all these below.
 
 
 Simple recurring events
@@ -79,12 +119,12 @@ Streams
 
   Note: "every" spec with timezone of a specific place.
 
-    Raw timezone can be used in time spec (e.g. "12pm PDT"), but it won't
-    auto-change when daylight savings periods start/end, so e.g. BST (+1) won't
-    turn into GMT (+0) when explicitly specified and vice-versa, but specifying
-    [Europe/London] (see /usr/share/zoneinfo) will account for such changes.
+    Raw timezone can be used in time spec (e.g. "12pm PDT"), but it might not
+    flip correctly when daylight savings periods start/end, so e.g. BST (+1) won't
+    turn into GMT (+0) when explicitly specified and vice-versa, while specifying
+    [Europe/London] (see /usr/share/zoneinfo) will always account for such changes.
 
-  Note: duration + ts spec instead of start/end.
+  Note: ``:duration:`` + ``:ts:`` spec instead of start/end.
 
 
 Podcasts
@@ -108,6 +148,7 @@ Podcasts
     specified feed-rss will be checked and current event created only when new
     items there are detected.
 
+  .. TODO: implement url/feed checks
   .. TODO: note on options with parameters for such event and feed checks.
 
 - Hello Internet
