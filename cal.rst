@@ -42,7 +42,8 @@ Kept in the head of the doc, as stuff is added and removed here all the time.
       ( "UTC" | ("+"|"-") HH:MM | region/place | abbrev )
       examples: +05:00, America/Los_Angeles, BST
         (anything that pytz can parse, basically)
-    TIME: [H]H[:MM[:SS]] ["am"|"pm"]
+    TIME:
+      ( [H]H[:MM[:SS]] ["am"|"pm"] | "noon" | "midnight" )
 
   Gist is that something like "every Friday 13th at 9pm [US/Eastern]",
   "every Mon-Fri 19:45" or "every 12d interval" will just do what it says,
