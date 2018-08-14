@@ -166,14 +166,16 @@ Podcasts
 
 - Hello Internet
 
-  :ts-start: Tue Jan 2 2018
+  :ts-start: Tue Jan 2 2018 [US/Eastern]
   :ts: every 3w interval
   :url: http://www.hellointernet.fm/
   :feed-rss: http://www.hellointernet.fm/podcast?format=rss
 
+  Note: timezone specified as "[zoneinfo]" in "ts-start" for reliable DST flipping.
+
   Note:
 
-    time interval specification with "ts-start" for a zero point.
+    Time interval specification with "ts-start" for a zero point.
     In this example, event will be added to every third Tue since ts-start date.
     ("Tue" because "Jan 2 2018" is a tue, "third" due to 3w spec)
 

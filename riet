@@ -242,7 +242,11 @@ def parse_ts_or_interval(ts_str):
 
 def parse_ts(ts_str, in_future=True):
 	assert isinstance(ts_str, str), [type(ts_str), repr(ts_str)]
-	ts = None
+	ts = tz = None
+	m = re.search(r'(.*)?\s+\[([^\]]+)\]\s*$', ts_str)
+	if m:
+		ts_str, tz = m.groups()
+		tz = pytz.timezone(tz.strip())
 	if not ts:
 		match = re.search( # common BE format
 			r'^(?P<date>(?:\d{2}|(?P<Y>\d{4}))-\d{2}-\d{2})'
@@ -280,7 +284,9 @@ def parse_ts(ts_str, in_future=True):
 				ts_ext = list(str(v).replace(',', ' ') for v in ts_ext)
 				continue
 			break
-	if ts: return ts
+	if ts:
+		if tz: ts = tz.localize(ts, is_dst=None)
+		return ts
 	raise TSParseError(ts_str)
 
 def parse_ts_interval(ts_str):
