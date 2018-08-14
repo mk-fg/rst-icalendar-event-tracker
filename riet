@@ -751,11 +751,13 @@ def main(args=None):
 		parser = dict( ts=parse_ts_or_interval, ts_start=parse_ts,
 			ts_end=parse_ts, duration=parse_duration )[key.replace('-', '_').lower()]
 		res = parser(value)
-		res = ( repr_ts(res) if isinstance(res, dt.datetime)
+		res_str = ( repr_ts(res) if isinstance(res, dt.datetime)
 			else str(res).replace('datetime.', '').replace('timedelta(', 'td(') )
-		if len(res) > 50: res = '\n' + text_fill(res, len(res) / 2 + 5, ' '*2, ' '*4)
+		if len(res_str) > 50: res_str = '\n' + text_fill(res_str, len(res_str) / 2 + 5, ' '*2, ' '*4)
 		print(f'Raw value: {value!r}')
-		print(f'Parsed value (field={key}): {res}')
+		print(f'Parsed value (field={key}): {res_str}')
+		if isinstance(res, dt.timedelta): print(f'Total seconds: {res.total_seconds()}')
+		if isinstance(res, dt.datetime): print(f'POSIX timestamp: {res.timestamp()}')
 		return
 
 	rst_stdin, rst_path = not opts.rst_file or opts.rst_file == '-', pl.Path(opts.rst_file)
