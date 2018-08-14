@@ -577,8 +577,8 @@ def conky_event_time_repr(ts_now, day, ts0, ts1):
 		if not ts0.hour == ts0.minute == 0: tk = 'fixed'
 	elif (ts0 - delta_1s).date() < day and (ts1 + delta_1s).date() > day: pass # whole day
 	elif ts0.date() == day and ts1.date() == day: tk = 'span'
-	elif (ts0 - delta_1s).date() == day: tk = 'from'
-	elif (ts1 + delta_1s).date() == day: tk = 'until'
+	elif (ts0 - delta_1s).date() == (ts0 + delta_1s).date() == day: tk = 'from'
+	elif (ts1 - delta_1s).date() == (ts1 + delta_1s).date() == day: tk = 'until'
 
 	ts = conv_ts_local(ts_now) # for correct ts.date()
 	if tk == 'fixed':
