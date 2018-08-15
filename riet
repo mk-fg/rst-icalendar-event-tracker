@@ -397,7 +397,9 @@ def repr_ts_diff( ts, ts0=None,
 	res, s, n_last = list(), delta.total_seconds(), units_max - 1
 	for unit, unit_s in sorted(_units.items(), key=op.itemgetter(1), reverse=True):
 		val = math.floor(s / unit_s)
-		if not val: continue
+		if not val:
+			if units_res == unit: break
+			continue
 		if len(res) == n_last or units_res == unit:
 			val, n_last = round(s / unit_s), True
 		res.append('{:.0f}{}'.format(val, unit))
