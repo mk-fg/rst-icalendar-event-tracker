@@ -236,11 +236,14 @@ def parse_duration(ts_str):
 		delta.append(val)
 	return dt.timedelta(*delta)
 
-def parse_ts_or_interval(ts_str):
+def parse_ts_or_interval(ts_str, multiple=False):
 	m = re.search(r'(?i)^every\s+(.*)', ts_str)
-	return parse_ts(ts_str) if not m else parse_ts_interval(m.group(1))
+	ts = ( parse_ts(ts_str, multiple=multiple)
+		if not m else parse_ts_interval(m.group(1)) )
+	if multiple and not isinstance(ts, list): ts = [ts]
+	return ts
 
-def parse_ts(ts_str, in_future=True):
+def parse_ts(ts_str, in_future=True, multiple=False):
 	assert isinstance(ts_str, str), [type(ts_str), repr(ts_str)]
 	ts = tz = None
 	m = re.search(r'(.*)?\s+\[([^\]]+)\]\s*$', ts_str)
@@ -263,7 +266,7 @@ def parse_ts(ts_str, in_future=True):
 			except ValueError: pass
 	if not ts:
 		# coreutils' "date" parses virtually everything, but is more expensive to use
-		ts_ext = [ts_str]
+		ts_ext, ts_list = [ts_str], list()
 		if in_future: ts_now_sec, ts_now_date = time.time(), dt.date.today()
 		while True:
 			ts_str_ext = ' '.join(ts_ext)
@@ -275,6 +278,7 @@ def parse_ts(ts_str, in_future=True):
 				# Whitelisted cases: 1:00, 4am, 5am GMT, 3:30 UTC-4
 				if in_future and 0 < ts_now_sec - val <= 24*3600 and re.search(
 						r'(?i)^[\d:]+\s*(am|pm)?\s*([-+][\d:]+|\w+|\w+[-+][\d:]+)?$', ts_str.strip() ):
+					ts_list.append(ts)
 					ts_ext.append('+ 1 day') # note: just val+=24*3600 can be incorrect due to DST
 					continue
 				ts = dt.datetime.fromtimestamp(val) # note: naive dt in local tz
@@ -282,14 +286,18 @@ def parse_ts(ts_str, in_future=True):
 				#  have a YYYY spec and resolve to past dates
 				if ( in_future and 0 < ts_now_sec - val <= 365*24*3600
 						and ts.date() != ts_now_date and not re.search(r'\b\d{4}\b', ts_str) ):
+					ts_list.append(ts)
 					ts = ts.replace(year=ts.year+1)
 			elif ',' in ts_str_ext:
 				# "date -d" seem to have issues with commas, but removing them works
 				ts_ext = list(str(v).replace(',', ' ') for v in ts_ext)
 				continue
 			break
+		if multiple: ts = ts_list + [ts]
 	if ts:
-		if tz: ts = tz.localize(ts, is_dst=None)
+		if not isinstance(ts, list): ts = [ts]
+		if tz: ts = list(tz.localize(ts, is_dst=None) for ts in ts)
+		if not multiple: ts = ts[-1]
 		return ts
 	raise TSParseError(ts_str)
 
@@ -512,7 +520,7 @@ def parse_cal_list_from_rst(rst_str):
 			for ts in ts_str_list:
 				ts = ts_str_norm(ts)
 				if not ts: continue
-				res['ts'].append(parse_ts_or_interval(ts))
+				res['ts'].extend(parse_ts_or_interval(ts, multiple=True))
 		else: res['ts'] = res['raw_ts'] = list()
 		for k in 'ts_start', 'ts_end', 'duration':
 			k_raw = f'raw_{k}'
