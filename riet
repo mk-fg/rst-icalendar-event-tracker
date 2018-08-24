@@ -9,7 +9,7 @@ import pytz
 # As-needed deps: docutils, icalendar
 
 
-class LogMessage(object):
+class LogMessage:
 	def __init__(self, fmt, a, k): self.fmt, self.a, self.k = fmt, a, k
 	def __str__(self): return self.fmt.format(*self.a, **self.k) if self.a or self.k else self.fmt
 
@@ -264,6 +264,7 @@ def parse_ts(ts_str, in_future=True):
 	if not ts:
 		# coreutils' "date" parses virtually everything, but is more expensive to use
 		ts_ext = [ts_str]
+		if in_future: ts_now_sec, ts_now_date = time.time(), dt.date.today()
 		while True:
 			ts_str_ext = ' '.join(ts_ext)
 			res = subprocess.run( ['date', '+%s', '-d', ts_str_ext],
@@ -272,13 +273,16 @@ def parse_ts(ts_str, in_future=True):
 				val = int(res.stdout.strip())
 				# Try to add +1 day to simple timestamps like 3:00 if they're in the past
 				# Whitelisted cases: 1:00, 4am, 5am GMT, 3:30 UTC-4
-				if in_future and 0 < time.time() - val <= 24*3600 and re.search(
+				if in_future and 0 < ts_now_sec - val <= 24*3600 and re.search(
 						r'(?i)^[\d:]+\s*(am|pm)?\s*([-+][\d:]+|\w+|\w+[-+][\d:]+)?$', ts_str.strip() ):
 					ts_ext.append('+ 1 day') # note: just val+=24*3600 can be incorrect due to DST
 					continue
 				ts = dt.datetime.fromtimestamp(val) # note: naive dt in local tz
-				if ( in_future and 0 < time.time() - val <= 365*24*3600
-					and not re.search(r'\b\d{4}\b', ts_str) ): ts = ts.replace(year=ts.year+1)
+				# Try to add +1 year to timestamps that don't
+				#  have a YYYY spec and resolve to past dates
+				if ( in_future and 0 < ts_now_sec - val <= 365*24*3600
+						and ts.date() != ts_now_date and not re.search(r'\b\d{4}\b', ts_str) ):
+					ts = ts.replace(year=ts.year+1)
 			elif ',' in ts_str_ext:
 				# "date -d" seem to have issues with commas, but removing them works
 				ts_ext = list(str(v).replace(',', ' ') for v in ts_ext)
@@ -885,7 +889,7 @@ def main(args=None):
 		with dst_stream as dst:
 			conky_config_gen(dst, ts_now, day0, day1, conky, conky_params)
 
-	if state_path and not opts.state_preserve:
+	if state_path and not opts.state_preserve and state.data:
 		state.cleanup(timeout=2*365*24*3600)
 		with safe_replacement(state_path) as dst: json.dump(state.data, dst)
 
