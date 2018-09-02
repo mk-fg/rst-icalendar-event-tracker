@@ -888,6 +888,7 @@ def main(args=None):
 		else: log.debug('No calendar entries within timespan, skipping ICS generation')
 
 	if opts.conky:
+		conky.sort(key=op.attrgetter('ts0'))
 		path = str(pl.Path(opts.conky).expanduser())
 		log.debug('Generating conky configuration snippet: {}', path)
 		ts_now = dt.datetime.utcnow().replace(tzinfo=pytz.utc)
