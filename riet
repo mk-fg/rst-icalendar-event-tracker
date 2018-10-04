@@ -49,23 +49,6 @@ def safe_replacement(path, *open_args, mode=None, **open_kws):
 			try: os.unlink(tmp.name)
 			except OSError: pass
 
-class CacheDict(cs.UserDict):
-	@classmethod
-	def init_data(cls, state):
-		self = cls()
-		self.data = state
-		return self
-	def __setitem__(self, k, v):
-		return super().__setitem__(k, (time.time(), v))
-	def __getitem__(self, k):
-		v = super().__getitem__(k)[1]
-		self[k] = v # update ts
-		return v
-	def cleanup(self, ts_min=None, timeout=2*365*24*3600):
-		if ts_min is None: ts_min = time.time() - timeout
-		for k, v in list(self.data.items()):
-			if v[0] < ts_min: self.data.pop(k)
-
 str_hash = lambda p: base64.urlsafe_b64encode(
 	hashlib.blake2s(str(p).encode(), key=b'riet.path_hash').digest() ).decode()[:12]
 
@@ -83,6 +66,38 @@ def tuple_hash(data):
 	return str_hash('\ue000'.join(
 		'\ue001{}\ue001'.format(v.replace('\ue001', '\ue001'*2)) for v in src ))
 
+
+### Persistent state tracking
+
+class PersistentStateError(Exception): pass
+
+class PersistentState(cs.UserDict):
+
+	version = 1
+
+	def __setitem__(self, k, v):
+		return super().__setitem__(k, (time.time(), v))
+	def __getitem__(self, k):
+		v = super().__getitem__(k)[1]
+		self[k] = v # update ts
+		return v
+
+	def load(self, dump):
+		if not dump or not dump.get('version'):
+			self.ts_init, self.data = time.time(), dump
+		else:
+			if dump['version'] != self.version: # only this one recognized so far
+				raise PersistentStateError(
+					f'Unrecognized state-dump version: {dump["version"]}' )
+			self.ts_init, self.data = dump['ts_init'], dump['data']
+
+	def dump(self):
+		return dict(version=self.version, ts_init=self.ts_init, data=self.data)
+
+	def cleanup(self, ts_min=None, timeout=2*365*24*3600):
+		if ts_min is None: ts_min = time.time() - timeout
+		for k, v in list(self.data.items()):
+			if v[0] < ts_min: self.data.pop(k)
 
 
 ### Date/time processing helpers
@@ -777,7 +792,7 @@ def main(args=None):
 	rst_stdin, rst_path = not opts.rst_file or opts.rst_file == '-', pl.Path(opts.rst_file)
 	with open(sys.stdin.fileno() if rst_stdin else rst_path) as src: rst_text = src.read()
 
-	state_path, state = opts.state_file, dict()
+	state_path, state = opts.state_file, PersistentState()
 	if '{hash}' in state_path:
 		if rst_stdin: state_path = '-'
 		else: state_path = state_path.format(hash=str_hash(rst_path.resolve()))
@@ -786,10 +801,8 @@ def main(args=None):
 		state_path = pl.Path(state_path).resolve()
 		log.debug('Using state-file path: {}', state_path)
 		state_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-		if state_path.exists():
-			state = json.loads(state_path.read_text())
+		if state_path.exists(): state.load(json.loads(state_path.read_text()))
 	if opts.state_flush: state.clear()
-	state = CacheDict.init_data(state)
 
 	if opts.ical:
 		import icalendar as ic # https://tools.ietf.org/html/rfc5545
@@ -900,6 +913,6 @@ def main(args=None):
 
 	if state_path and not opts.state_preserve and state.data:
 		state.cleanup(timeout=2*365*24*3600)
-		with safe_replacement(state_path) as dst: json.dump(state.data, dst)
+		with safe_replacement(state_path) as dst: json.dump(state.dump(), dst)
 
 if __name__ == '__main__': sys.exit(main())
