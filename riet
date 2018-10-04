@@ -67,6 +67,7 @@ def tuple_hash(data):
 		'\ue001{}\ue001'.format(v.replace('\ue001', '\ue001'*2)) for v in src ))
 
 
+
 ### Persistent state tracking
 
 class PersistentStateError(Exception): pass
@@ -98,6 +99,7 @@ class PersistentState(cs.UserDict):
 		if ts_min is None: ts_min = time.time() - timeout
 		for k, v in list(self.data.items()):
 			if v[0] < ts_min: self.data.pop(k)
+
 
 
 ### Date/time processing helpers
@@ -571,12 +573,12 @@ def parse_cal_list_from_rst(rst_str):
 
 
 
-### Conky config generator
+### Text-based output generators
 
-ConkyEvent = cs.namedtuple('ConkyEvent', 'ts0 ts1 cal')
+EventInfo = cs.namedtuple('EventInfo', 'ts0 ts1 cal')
 
-conky_params_default = dict(
-	max_text_lines=9, max_text_break='${alignr}[more]', max_text_color='d9374c',
+text_params_default = dict(
+	max_text_lines=9, max_text_break='[more]', max_text_color='d9374c',
 	eta_res='h', line_color='aaa', line_pos=-9, line_step=1, line_w=1,
 	color='', c_weekday='lightgray', c_date='gray', c_time='lightgray', c_title='',
 	c_eta_day='lightgray', c_eta_pass='999', c_eta_12='42a150', c_eta_6='9ebd5f',
@@ -584,22 +586,22 @@ conky_params_default = dict(
 	pos_weekday=65, pos_date=0, pos_title=170,
 	pos_time_fixed=110, pos_time_span=100, pos_time_from=100, pos_time_until=100 )
 
-def conky_params_str_parse(conky_params_str, base=conky_params_default):
-	conky_params = adict(base.copy())
-	if not conky_params_str: return conky_params
-	if not isinstance(conky_params_str, str):
-		conky_params_str = ' '.join(conky_params_str)
+def text_params_str_parse(text_params_str, base=text_params_default):
+	text_params = adict(base.copy())
+	if not text_params_str: return text_params
+	if not isinstance(text_params_str, str):
+		text_params_str = ' '.join(text_params_str)
 	for spec in it.chain.from_iterable(
-			col.strip().split() for col in conky_params_str.split(',') ):
+			col.strip().split() for col in text_params_str.split(',') ):
 		try:
 			k, v = spec.split('=', 1)
-			if k not in conky_params: raise ValueError(k)
-			conky_params[k] = v
+			if k not in text_params: raise ValueError(k)
+			text_params[k] = v
 		except ValueError:
 			parser.error(f'Invalid column/width spec: {spec!r}')
-	return conky_params
+	return text_params
 
-def conky_event_time_repr(ts_now, day, ts0, ts1):
+def text_event_time_repr(ts_now, day, ts0, ts1):
 	'Return string repr for time within specified day, time/span type and delta until event.'
 	tk = None
 	if ts0 == ts1 or (ts1 - ts0).total_seconds() < 3*60:
@@ -642,46 +644,61 @@ def conky_eta_color(delta, cc):
 		else: break
 	return cc.get(k) or ''
 
-def conky_config_gen(dst, ts_now, day0, day1, events, conky_params):
+def text_report_gen(dst, ts_now, day0, day1, events, text_params, conky=False):
 	day, lines, delta_dedup = day0, 0, set()
-	cc_base = cc = conky_params
+	cc_base = cc = text_params
 	cc.max_text_lines = int(cc.max_text_lines) - 1
+	if not conky:
+		plain_div, plain_strftime_len, plain_strftime = '- '*21, 16, ' %Y-%m-%d %a '
 	while day < day1:
 		day_events = list()
 		for ts0, ts1, cal in events:
 			if not ts0.date() <= day <= ts1.date(): continue
-			day_ts, tk, delta = conky_event_time_repr(ts_now, day, ts0, ts1)
+			day_ts, tk, delta = text_event_time_repr(ts_now, day, ts0, ts1)
 			day_events.append((day_ts, tk, delta, cal))
 
 		if day_events and lines <= cc.max_text_lines:
+			day_start = True
 			if lines:
-				dst.write(
-					f'${{color {cc.line_color}}}${{voffset {cc.line_pos}}}'
-					f'${{stippled_hr {cc.line_step} {cc.line_w}}}'
-					f'${{voffset {-int(cc.line_pos)}}}${{color {cc.color}}}' )
-			dst.write(day.strftime(
-				f'${{goto {cc.pos_weekday}}}${{color {cc.c_weekday}}}%a${{color}}'
-				f'${{goto {cc.pos_date}}}${{color {cc.c_date}}}%Y-%m-%d${{color}}' ))
+				if not conky: dst.write(plain_div + '\n')
+				else:
+					dst.write(
+						f'${{color {cc.line_color}}}${{voffset {cc.line_pos}}}'
+						f'${{stippled_hr {cc.line_step} {cc.line_w}}}'
+						f'${{voffset {-int(cc.line_pos)}}}${{color {cc.color}}}' )
+			if not conky: dst.write(day.strftime(plain_strftime))
+			else:
+				dst.write(day.strftime(
+					f'${{goto {cc.pos_weekday}}}${{color {cc.c_weekday}}}%a${{color}}'
+					f'${{goto {cc.pos_date}}}${{color {cc.c_date}}}%Y-%m-%d${{color}}' ))
 
 			for day_ts, tk, delta, cal in day_events:
-				cc = conky_params_str_parse(cal.get('conky'), cc_base)
-				if lines > cc.max_text_lines: continue
-				if day_ts:
+				if lines > cc.max_text_lines: break
+				if not conky and not day_start: dst.write(day.strftime(' '*plain_strftime_len))
+				day_start, cc = False, text_params_str_parse(cal.get('conky'), cc_base)
+				if not conky: dst.write(f'{day_ts or "":^14}')
+				elif day_ts:
 					pos = cc[f'pos_time_{tk}']
 					dst.write( f'${{goto {pos}}}'
 						f'${{color {cc.c_time}}}{day_ts}${{color {cc.color}}}' )
-				title = cal.title
-				if title not in delta_dedup:
-					delta_dedup.add(title)
-					delta_str = repr_ts_diff(
-						delta, units_res=cc.eta_res,
-						ext=None if delta.total_seconds() >= 0 else 'ago' )
-					title += f'${{alignr}}${{color {conky_eta_color(delta, cc)}}}[ {delta_str} ]'
-				dst.write( f'${{goto {cc.pos_title}}}'
-					f'${{color {cc.c_title}}}{title}${{color {cc.color}}}' )
+				delta_str = repr_ts_diff(
+					delta, units_res=cc.eta_res,
+					ext=None if delta.total_seconds() >= 0 else 'ago' )
+				if not conky: title = f'[ {delta_str:>6} ]  {cal.title}'
+				else:
+					title = cal.title
+					if title not in delta_dedup:
+						delta_dedup.add(title)
+						title += f'${{alignr}}${{color {conky_eta_color(delta, cc)}}}[ {delta_str} ]'
+				if not conky: dst.write(title)
+				else:
+					dst.write( f'${{goto {cc.pos_title}}}'
+						f'${{color {cc.c_title}}}{title}${{color {cc.color}}}' )
 				if lines == cc.max_text_lines:
-					dst.write( f' ${{color {cc.max_text_color}}}'
-						f'{cc.max_text_break}${{color {cc.color}}}' )
+					if not conky: dst.write(f'\n{cc.max_text_break}')
+					else:
+						dst.write( f' ${{color {cc.max_text_color}}}'
+							f'${{alignr}}{cc.max_text_break}${{color {cc.color}}}' )
 				lines += 1
 				dst.write('\n')
 
@@ -692,7 +709,7 @@ def conky_config_gen(dst, ts_now, day0, day1, events, conky_params):
 ### CLI
 
 def main(args=None):
-	conky_params_default_str = ' '.join(f'{c}={o}' for c, o in conky_params_default.items())
+	text_params_default_str = ' '.join(f'{c}={o}' for c, o in text_params_default.items())
 
 	import argparse, textwrap
 
@@ -723,19 +740,26 @@ def main(args=None):
 		help='''
 			Generate ICS (icalendar) output file at specified path.
 			"-" can be unsed instead of path to output to stdout instead.''')
+	group.add_argument('-p', '--plain', metavar='path',
+		help='''
+			Generate simple plaintext calendar, somewhat similar
+				to conky config snippet, except without any conky-specific markup.
+			 "-" can be unsed instead of path to output to stdout instead.''')
 	group.add_argument('-c', '--conky', metavar='path',
 		help='''
 			Generate conky configuration snippet for e.g. execi or catp include/command.
 			 "-" can be unsed instead of path to output to stdout instead.''')
-	group.add_argument('-o', '--conky-params',
-		metavar='pos=offset,color=value,...', default=conky_params_default_str,
+	group.add_argument('-o', '--text-params',
+		metavar='pos=offset,color=value,...', default=text_params_default_str,
 		help='''
-			Various conky parameters in calendar table generated by -c/--conky option.
+			Various text and conky config parameters in calendar table(s)
+				generated by either -p/--plain or -c/--conky options.
 			Overrides for one or more values can be specified in any order,
 				separated by commas and/or spaces.
-			These can also be overidden on per-item basis via :conky: parameter in rst.
+			For conky config, these can also be
+				overidden on per-item basis via :conky: parameter in rst.
 			Default parameters are:\n{}'''.format(
-				text_fill(conky_params_default_str, len(conky_params_default_str) // 5 - 5, '\t'*4) ))
+				text_fill(text_params_default_str, len(text_params_default_str) // 5 - 5, '\t'*4) ))
 
 	group = parser.add_argument_group('Event filtering')
 	group.add_argument('-e', '--event', metavar='title-part',
@@ -809,9 +833,9 @@ def main(args=None):
 		ical, ev = ic.Calendar(), None
 		ical.add('prodid', '-//rst-icalendar-event-tracker//fraggod.net//EN')
 		ical.add('version', '2.0')
-	if opts.conky:
-		conky = list()
-		conky_params = conky_params_str_parse(opts.conky_params)
+	if opts.conky or opts.plain:
+		ev_list = list()
+		text_params = text_params_str_parse(opts.text_params)
 
 	ts_min = conv_ts_utc(parse_ts(opts.time_start, in_future=False))
 	ts_max = ts_min + parse_duration(opts.time_span)
@@ -887,8 +911,8 @@ def main(args=None):
 				ev.add('dtstamp', conv_ts_local(ts_min))
 				if cal.get('url'): ev.add('url', cal.url)
 				ical.add_component(ev)
-			if opts.conky:
-				conky.append(ConkyEvent(
+			if opts.conky or opts.plain:
+				ev_list.append(EventInfo(
 					conv_ts_local(ts0), conv_ts_local(ts1), cal ))
 
 	if opts.ical:
@@ -900,16 +924,21 @@ def main(args=None):
 			with dst_stream as dst: dst.write(ical.to_ical())
 		else: log.debug('No calendar entries within timespan, skipping ICS generation')
 
-	if opts.conky:
-		conky.sort(key=op.attrgetter('ts0'))
-		path = str(pl.Path(opts.conky).expanduser())
-		log.debug('Generating conky configuration snippet: {}', path)
+	if opts.conky or opts.plain:
+		ev_list.sort(key=op.attrgetter('ts0'))
 		ts_now = dt.datetime.utcnow().replace(tzinfo=pytz.utc)
 		day0, day1 = conv_ts_local(ts_min).date(), conv_ts_local(ts_max).date()
-		dst_stream = ( open(sys.stdout.fileno(), 'w')
-			if path == '-' else safe_replacement(path) )
-		with dst_stream as dst:
-			conky_config_gen(dst, ts_now, day0, day1, conky, conky_params)
+		for report_type in 'conky', 'plain':
+			path = getattr(opts, report_type)
+			if not path: continue
+			path = str(pl.Path(path).expanduser())
+			log.debug('Generating {} configuration snippet: {}', report_type, path)
+			dst_stream = ( open(sys.stdout.fileno(), 'w')
+				if path == '-' else safe_replacement(path) )
+			with dst_stream as dst:
+				text_report_gen(
+					dst, ts_now, day0, day1, ev_list,
+					text_params, conky=report_type == 'conky' )
 
 	if state_path and not opts.state_preserve and state.data:
 		state.cleanup(timeout=2*365*24*3600)
