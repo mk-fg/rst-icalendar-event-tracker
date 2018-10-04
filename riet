@@ -861,7 +861,8 @@ def main(args=None):
 			else:
 				ts0_k = tuple_hash((cal.title, ts0, ts))
 				ts_hashes.add(ts0_k)
-				ts0 = ts0_pre = ts0_orig = conv_ts_utc(state.get(ts0_k)) or ts0 or ts_min
+				ts0_orig = conv_ts_utc(state.get(ts0_k))
+				ts0 = ts0_pre = ts0_orig or ts0 or ts_min
 				if ts1 and ts0 > ts1: # event ending in the past
 					ts0 = None
 					break
