@@ -779,6 +779,10 @@ def main(args=None):
 				"hash" component in the template will be replaced by hash of source rst path.
 				Static path (no "{hash}" thing) must be specified to use with rst from stdin.
 				Can be set to "-" to not track it and recalculate them from --time-start on each run.''')
+	group.add_argument('-r', '--state-reset', metavar='title',
+		help='Reset state for events with matching title'
+				' (case-insensitive string-in-title match).'
+			' Will raise error if no match was found.')
 	group.add_argument('--state-flush',
 		action='store_true', help='Discard any existing --state-file data.')
 	group.add_argument('--state-preserve',
@@ -827,6 +831,7 @@ def main(args=None):
 		state_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
 		if state_path.exists(): state.load(json.loads(state_path.read_text()))
 	if opts.state_flush: state.clear()
+	state_reset_found, state_reset = False, opts.state_reset and opts.state_reset.lower()
 
 	if opts.ical:
 		import icalendar as ic # https://tools.ietf.org/html/rfc5545
@@ -861,6 +866,9 @@ def main(args=None):
 			else:
 				ts0_k = tuple_hash((cal.title, ts0, ts))
 				ts_hashes.add(ts0_k)
+				if state_reset and state_reset in cal.title.lower():
+					state_reset_found = True
+					state.pop(ts0_k, None)
 				ts0_orig = conv_ts_utc(state.get(ts0_k))
 				ts0 = ts0_pre = ts0_orig or ts0 or ts_min
 				if ts1 and ts0 > ts1: # event ending in the past
@@ -915,6 +923,11 @@ def main(args=None):
 			if opts.conky or opts.plain:
 				ev_list.append(EventInfo(
 					conv_ts_local(ts0), conv_ts_local(ts1), cal ))
+
+	if state_reset and not state_reset_found:
+		print( 'ERROR: Failed to find event title'
+			f' matching --state-reset option: {state_reset}', file=sys.stderr )
+		return 1
 
 	if opts.ical:
 		if ev:
