@@ -77,12 +77,12 @@ def main(args=None):
 	tza_dict = cs.defaultdict(set)
 
 	with contextlib.ExitStack() as ctx:
-		sub = ctx.enter_context
-		tmp_dir = pl.Path(sub(tempfile.TemporaryDirectory(prefix='tz-db.')))
+		tmp_dir = pl.Path(ctx.enter_context(
+			tempfile.TemporaryDirectory(prefix='tz-db.') ))
 		with zipfile.ZipFile(opts.file) as src: src.extractall(tmp_dir)
 
 		src_tza, src_zones = (
-			sub((tmp_dir / k).open(encoding='utf-8-sig'))
+			ctx.enter_context((tmp_dir / k).open(encoding='utf-8-sig'))
 			for k in ['timezone.csv', 'zone.csv'] )
 
 		zone_names = dict()
