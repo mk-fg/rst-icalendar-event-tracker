@@ -107,6 +107,33 @@ class PersistentState(cs.UserDict):
 class TSParseError(Exception): pass
 class TSOverflow(Exception): pass
 
+# Common timezone abbrevs which pytz refuses to handle
+# Use make-tza-map.py script to produce these mappings from timezonedb.com/download csv
+tza_map = dict(line.split('=', 1) for line in '''
+	EMT=Pacific/Easter PPT=America/Los_Angeles YST=America/Anchorage JST=Asia/Tokyo
+	RMT=Europe/Rome PKT=Asia/Karachi AMT=Europe/Amsterdam EST=America/New_York
+	QMT=America/Guayaquil PDDT=America/Inuvik WEST=Europe/Paris JDT=Asia/Tokyo
+	NDDT=America/St_Johns AWDT=Australia/Perth CST=America/Chicago KMT=Europe/Kiev
+	SDMT=America/Santo_Domingo AEDT=Australia/Sydney CDT=America/Chicago
+	EDDT=America/Iqaluit AWST=Australia/Perth PKST=Asia/Karachi CET=Europe/Berlin
+	AKDT=America/Anchorage HDT=Pacific/Honolulu CEST=Europe/Berlin LST=Europe/Riga
+	CWT=America/Chicago CPT=America/Chicago IMT=Europe/Istanbul SST=Pacific/Midway
+	MST=America/Phoenix EET=Europe/Sofia EEST=Europe/Sofia PLMT=Asia/Ho_Chi_Minh
+	PST=America/Los_Angeles PDT=America/Los_Angeles HKT=Asia/Hong_Kong
+	HST=Pacific/Honolulu SJMT=America/Costa_Rica HMT=Europe/Helsinki KST=Asia/Seoul
+	GMT=Europe/London WEMT=Europe/Paris AEST=Australia/Sydney IST=Asia/Jerusalem
+	JMT=Asia/Jerusalem SET=Europe/Stockholm IDT=Asia/Jerusalem WAT=Africa/Lagos
+	CEMT=Europe/Berlin NZMT=Pacific/Auckland FMT=Atlantic/Madeira WIT=Asia/Jayapura
+	MDT=America/Phoenix WAST=Africa/Ndjamena EPT=America/New_York WMT=Europe/Warsaw
+	AKST=America/Anchorage CMT=America/Argentina/Buenos_Aires TMT=Asia/Tehran
+	BST=Europe/London MSD=Europe/Moscow AHDT=America/Anchorage WET=Europe/Paris
+	MSK=Europe/Moscow MMT=Europe/Moscow PWT=America/Los_Angeles MDST=Europe/Moscow
+	TBMT=Asia/Tbilisi PPMT=America/Port-au-Prince FFMT=America/Martinique
+	KDT=Asia/Seoul NZDT=Pacific/Auckland EWT=America/New_York HKST=Asia/Hong_Kong
+	SAST=Africa/Johannesburg ACDT=Australia/Adelaide ACST=Australia/Adelaide
+	NZST=Pacific/Auckland EDT=America/New_York IDDT=Asia/Jerusalem
+	DMT=Europe/Dublin AHST=America/Anchorage'''.split())
+
 IntervalFilter = cs.namedtuple('interval_filter', 'mo_days weekdays time tz')
 IntervalDelta = cs.namedtuple('interval_delta', 'y mo w d h m s')
 
@@ -266,7 +293,8 @@ def parse_ts(ts_str, in_future=True, multiple=False):
 	m = re.search(r'(.*)?\s+\[([^\]]+)\]\s*$', ts_str)
 	if m:
 		ts_str, tz = m.groups()
-		tz = pytz.timezone(tz.strip())
+		tz = tz.strip()
+		tz = pytz.timezone(tza_map.get(tz, tz))
 	if not ts:
 		match = re.search( # common BE format
 			r'^(?P<date>(?:\d{2}|(?P<Y>\d{4}))-\d{2}-\d{2})'
