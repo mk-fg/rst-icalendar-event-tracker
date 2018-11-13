@@ -111,4 +111,6 @@ TODO
   showing events from items with these only after updates,
   with titles derived from such updates.
 
+- Desktop and maybe other event notifications.
+
 - Maybe some auto-cleanup for passed one-off entries in rst file?
