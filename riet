@@ -77,7 +77,9 @@ class PersistentStateError(Exception): pass
 
 class PersistentState(cs.UserDict):
 
-	version = 1
+	version = 2
+
+	def key(self, ns, *tt): return f'{ns}.{tuple_hash(tt)}'
 
 	def __setitem__(self, k, v):
 		return super().__setitem__(k, (time.time(), v))
@@ -88,12 +90,16 @@ class PersistentState(cs.UserDict):
 
 	def load(self, dump):
 		if not dump or not dump.get('version'):
-			self.ts_init, self.data = time.time(), dump
-		else:
-			if dump['version'] != self.version: # only this one recognized so far
-				raise PersistentStateError(
-					f'Unrecognized state-dump version: {dump["version"]}' )
-			self.ts_init, self.data = dump['ts_init'], dump['data']
+			dump['ts_init'], dump['data'] = time.time(), dump
+		if dump['version'] < 2:
+			for k in list(dump['data'].keys()):
+				if k.startswith('cal.ts.'): continue
+				dump['data'][f'cal.ts.{k}'] = dump['data'].pop(k)
+			dump['version'] = 2
+		if dump['version'] != self.version: # only this one recognized so far
+			raise PersistentStateError(
+				f'Unrecognized state-dump version: {dump["version"]}' )
+		self.ts_init, self.data = dump['ts_init'], dump['data']
 
 	def dump(self):
 		return dict(version=self.version, ts_init=self.ts_init, data=self.data)
@@ -958,7 +964,7 @@ def main(args=None):
 	for cal in map(adict, cal_list):
 		if opts.event and opts.event.lower() not in cal.title.lower(): continue
 
-		ts_list, ts0, ts1, ts_hashes = cal.ts, cal.ts_start, cal.ts_end, set()
+		ts_list, ts0, ts1, ts_keys = cal.ts, cal.ts_start, cal.ts_end, set()
 		ts0, ts1 = map(conv_ts_utc, [ts0, ts1])
 		if ts1 and ts1 < ts0: ts1 = ts1.replace(year=ts1.year + 1)
 		if not ts_list: ts_list = [ts0]
@@ -972,8 +978,8 @@ def main(args=None):
 						' as "ts-start"/"ts-end" are used instead: {!r} [{}]', cal.title, ts )
 				elif not ts0: ts0 = conv_ts_utc(ts)
 			else:
-				ts0_k = tuple_hash((cal.title, ts0, ts))
-				ts_hashes.add(ts0_k)
+				ts0_k = state.key('cal.ts', cal.title, ts0, ts)
+				ts_keys.add(ts0_k)
 				if state_reset and state_reset in cal.title.lower():
 					state_reset_found = True
 					state.pop(ts0_k, None)
@@ -1011,7 +1017,7 @@ def main(args=None):
 			log.debug('')
 			log.debug('----- title: {}', cal.title)
 			log.debug('  raw: ts={} start={} end={}', cal.raw_ts, cal.raw_ts_start, cal.raw_ts_end)
-			if ts_hashes: log.debug('  hashes: {}', ' '.join(sorted(ts_hashes)))
+			if ts_keys: log.debug('  ts-keys: {}', ' '.join(sorted(ts_keys)))
 			for ts0, ts1 in ts_list:
 				log.debug('  result [{}]:', repr_ts_diff(ts1 - ts0))
 				log.debug('    from: {}', repr_ts(ts0))
