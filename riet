@@ -79,6 +79,10 @@ class PersistentState(cs.UserDict):
 
 	version = 2
 
+	def __init__(self, *args, **kws):
+		super().__init__(*args, **kws)
+		self.ts_init = time.time()
+
 	def key(self, ns, *tt): return f'{ns}.{tuple_hash(tt)}'
 
 	def __setitem__(self, k, v):
@@ -90,7 +94,7 @@ class PersistentState(cs.UserDict):
 
 	def load(self, dump):
 		if not dump or not dump.get('version'):
-			dump['ts_init'], dump['data'] = time.time(), dump
+			dump['ts_init'], dump['data'] = self.ts_init, dump or dict()
 		if dump['version'] < 2:
 			for k in list(dump['data'].keys()):
 				if k.startswith('cal.ts.'): continue
@@ -971,6 +975,7 @@ def main(args=None):
 		ts_base = ts0, ts1
 
 		for n, ts in enumerate(ts_list):
+			if not ts: continue
 			(ts0, ts1), ts_list[n] = ts_base, None
 			if isinstance(ts, dt.datetime):
 				if ts0 and ts1 and ts != ts0:
