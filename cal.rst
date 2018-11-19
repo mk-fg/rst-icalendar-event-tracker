@@ -17,6 +17,9 @@ Feed options (e.g. ``:feed-rss:``):
   For example, with 3 extra checks within 10-day interval,
   checks will be made after following number of days: 3, 7.7, 9.4, 10.
 
+  This should always be set unless --time-start in the past is used,
+  as otherwise there will never be past events eligible for feed checks.
+
   :feed-check-for: 10d
 
   Specifies how long to check feeds after one-off events.

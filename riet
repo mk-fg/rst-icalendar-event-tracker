@@ -38,6 +38,7 @@ def enum_func(opts, default=None, mutex_flags=False, **opts_kws):
 			if fw.fixed: ... elif fw.var: ... else: raise ValueError
 			font_width = enum_func(fixed=False, var=lambda fixed: not fixed)
 			font_width = enum_func('fixed var', mutex_flags=True) # auto-fill other one
+			fw = font_width.var # same as font_width(var=True), only set with mutex_flags
 		mutex_flags will auto-fill all opts that are missing values with
 			"not X" where X is first passed or auto-calculated one that is not None.'''
 	if isinstance(opts, str): opts = opts.split()
@@ -53,15 +54,20 @@ def enum_func(opts, default=None, mutex_flags=False, **opts_kws):
 			else: arg = res[k]
 			if callable(arg):
 				arg = arg(**dict((k, v) for k, v in res.items() if not callable(v)))
-			if mutex_flags and arg is not None: bool_fill = not arg
+			if mutex_flags and arg is not None: bool_fill = k
 			res[k] = arg
 		if len(args) > n + 1 or opt_kws:
 			raise ValueError( 'Mismatch between'
 				f' args/kws and opts: {args}/{kws} vs {list(opts.keys())}' )
-		if bool_fill is not None:
+		if bool_fill:
+			fill_v, res['_v'] = not res[bool_fill], bool_fill
 			for k, v in res.items():
-				if res[k] is None: res[k] = bool_fill
+				if res[k] is None: res[k] = fill_v
 		return adict(res)
+	if mutex_flags:
+		for k, v in opts.items():
+			setattr(make_enum, k, make_enum(**{k: True}))
+		make_enum._null = make_enum()
 	return make_enum
 
 @contextlib.contextmanager
@@ -842,6 +848,8 @@ def cal_list_to_events(cal_list, ts_min, ts_max, state):
 
 ### Text-based output generators
 
+TimeType = enum_func('fixed span since until', mutex_flags=True)
+
 text_params_default = dict(
 	max_text_lines=9, max_text_break='[more]', max_text_color='d9374c',
 	eta_res='h', line_color='aaa', line_pos=-9, line_step=1, line_w=1,
@@ -849,7 +857,7 @@ text_params_default = dict(
 	c_eta_day='lightgray', c_eta_pass='999', c_eta_12='42a150', c_eta_6='9ebd5f',
 	c_eta_4='d9d277', c_eta_3='f4ae58', c_eta_2='e87733', c_eta_1='d10027',
 	pos_weekday=65, pos_date=0, pos_title=170,
-	pos_time_fixed=110, pos_time_span=100, pos_time_from=100, pos_time_until=100 )
+	pos_time_fixed=110, pos_time_span=100, pos_time_since=100, pos_time_until=100 )
 
 def text_params_str_parse(text_params_str, base=text_params_default):
 	text_params = adict(base.copy())
@@ -868,25 +876,25 @@ def text_params_str_parse(text_params_str, base=text_params_default):
 
 def text_event_time_repr(ts_now, day, ts0, ts1):
 	'Return string repr for time within specified day, time/span type and delta until event.'
-	tk = None
+	tk = TimeType._null
 	if ts0 == ts1 or (ts1 - ts0).total_seconds() < 3*60:
-		if not ts0.hour == ts0.minute == 0: tk = 'fixed'
+		if not ts0.hour == ts0.minute == 0: tk = TimeType.fixed
 	elif (ts0 - delta_1s).date() < day and (ts1 + delta_1s).date() > day: pass # whole day
-	elif ts0.date() == day and ts1.date() == day: tk = 'span'
-	elif (ts0 - delta_1s).date() == (ts0 + delta_1s).date() == day: tk = 'from'
-	elif (ts1 - delta_1s).date() == (ts1 + delta_1s).date() == day: tk = 'until'
+	elif ts0.date() == day and ts1.date() == day: tk = TimeType.span
+	elif (ts0 - delta_1s).date() == (ts0 + delta_1s).date() == day: tk = TimeType.since
+	elif (ts1 - delta_1s).date() == (ts1 + delta_1s).date() == day: tk = TimeType.until
 
 	ts = conv_ts_local(ts_now) # for correct ts.date()
-	if tk == 'fixed':
+	if tk.fixed:
 		delta, day_ts = ts0 - ts, ts0.strftime('%H:%M')
-	elif tk == 'span':
+	elif tk.span:
 		day_ts = ts0.strftime('%H:%M') + '-' + ts1.strftime('%H:%M')
 		delta = (ts1 - ts) if ts > ts1 else (
 			(dt.timedelta(0) if ts > ts0 else (ts0 - ts)) )
-	elif tk == 'from':
+	elif tk.since:
 		day_ts = 'from ' + ts0.strftime('%H:%M')
 		delta = dt.timedelta(0) if ts > ts0 else (ts0 - ts)
-	elif tk == 'until':
+	elif tk.until:
 		day_ts = 'until ' + ts1.strftime('%H:%M')
 		delta = ( (ts1 - ts) if ts > ts1 else
 			((ts0 - ts) if ts < ts0 else dt.timedelta(0)) )
@@ -943,7 +951,7 @@ def text_report_gen(dst, ts_now, day0, day1, events, text_params, conky=False):
 				day_start, cc = False, text_params_str_parse(cal.get('conky'), cc_base)
 				if not conky: dst.write(f'{day_ts or "":^14}')
 				elif day_ts:
-					pos = cc[f'pos_time_{tk}']
+					pos = cc[f'pos_time_{tk._v}']
 					dst.write( f'${{goto {pos}}}'
 						f'${{color {cc.c_time}}}{day_ts}${{color {cc.color}}}' )
 				delta_str = repr_ts_diff(
