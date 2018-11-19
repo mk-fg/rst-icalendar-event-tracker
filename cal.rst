@@ -7,12 +7,20 @@ and is detected by having ``:config: 1`` value defined somewhere in it.
 
 :config: 1
 
-Feed options (for e.g. ``:feed-rss:``):
+Feed options (e.g. ``:feed-rss:``):
 
   :feed-interval-checks: 3
 
-  Make three *additional* checks within specified interval,
-  spaced exponentially from the end of it (when last check is made).
+  Make three *additional* checks within specified interval (if any),
+  spaced exponentially from the end of it, when last check is made.
+
+  For example, with 3 extra checks within 10-day interval,
+  checks will be made after following number of days: 3, 7.7, 9.4, 10.
+
+  :feed-check-for: 10d
+
+  Specifies how long to check feeds after one-off events.
+  Only applies to these.
 
 
 
@@ -220,3 +228,20 @@ or too annoying to use.
 
   :ts: every 1mo interval
   :url: https://steamcommunity.com/app/281990/workshop/
+
+
+
+Releases
+--------
+
+- Release of Some Interesting Thing
+
+  :ts: 2018-11-20
+  :feed-rss: http://some-thing.org/rss
+  :feed-check-for: 10d
+
+  Note:
+
+    With a one-off (not "every X") timestamp, ``:feed-rss:`` is not used,
+    unless ``:feed-check-for:`` interval (same as ``:duration:``) is specified
+    for it or in the common config section, during/after which checks will be made.

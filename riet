@@ -30,6 +30,40 @@ class adict(dict):
 		super().__init__(*args, **kwargs)
 		self.__dict__ = self
 
+def enum_func(opts, default=None, mutex_flags=False, **opts_kws):
+	'''Returns factory func for smart adict-based enums.
+		Example:
+			font_width = enum_func('fixed var')
+			fw = font_width(fixed=True) # or font_width(True), font_width(True, False)
+			if fw.fixed: ... elif fw.var: ... else: raise ValueError
+			font_width = enum_func(fixed=False, var=lambda fixed: not fixed)
+			font_width = enum_func('fixed var', mutex_flags=True) # auto-fill other one
+		mutex_flags will auto-fill all opts that are missing values with
+			"not X" where X is first passed or auto-calculated one that is not None.'''
+	if isinstance(opts, str): opts = opts.split()
+	if isinstance(opts, (tuple, list)): opts = dict.fromkeys(opts, default)
+	opts.update(opts_kws)
+	def make_enum(*args, **kws):
+		res, opt_kws, bool_fill = opts.copy(), kws.copy(), None
+		for n, k in enumerate(opts.keys()):
+			if len(args) > n:
+				if k in opt_kws: raise KeyError(f'Same opt in args/kws: {k}')
+				arg = args[n]
+			elif k in opt_kws: arg = opt_kws.pop(k)
+			else: arg = res[k]
+			if callable(arg):
+				arg = arg(**dict((k, v) for k, v in res.items() if not callable(v)))
+			if mutex_flags and arg is not None: bool_fill = not arg
+			res[k] = arg
+		if len(args) > n + 1 or opt_kws:
+			raise ValueError( 'Mismatch between'
+				f' args/kws and opts: {args}/{kws} vs {list(opts.keys())}' )
+		if bool_fill is not None:
+			for k, v in res.items():
+				if res[k] is None: res[k] = bool_fill
+		return adict(res)
+	return make_enum
+
 @contextlib.contextmanager
 def safe_replacement(path, *open_args, mode=None, **open_kws):
 	path = str(path)
@@ -48,6 +82,23 @@ def safe_replacement(path, *open_args, mode=None, **open_kws):
 		finally:
 			try: os.unlink(tmp.name)
 			except OSError: pass
+
+def retries_within_timeout( tries, timeout, reverse=True,
+		backoff_func=lambda e,n: ((e**n-1)/e), slack_factor=1e-3 ):
+	'''Return list of delays to make exactly n tires within timeout.
+		Monotonic backoff_func(e, n) should return delay values in range
+			of ~0 (n=0) to infinity (n=inf), with backoff_func(e, 2) giving value >e.
+		slack_factor is how close to timeout sum of resulting delays will be.'''
+	a, b, slack = 0, timeout, timeout * slack_factor
+	while True:
+		m = (a + b) / 2
+		delays = list(backoff_func(m, n) for n in range(tries))
+		error = sum(delays) - timeout
+		if abs(error) < slack: break
+		elif error > 0: b = m
+		else: a = m
+	if reverse: delays = list((timeout - d) for d in reversed(delays))
+	return delays
 
 str_hash = lambda p: base64.urlsafe_b64encode(
 	hashlib.blake2s(str(p).encode(), key=b'riet.path_hash').digest() ).decode()[:12]
@@ -708,9 +759,88 @@ def parse_data_from_rst(rst_str):
 
 
 
-### Text-based output generators
+### RST calendar entries processing
 
-EventInfo = cs.namedtuple('EventInfo', 'ts0 ts1 cal')
+EventInfo = cs.namedtuple('EventInfo', 'ts0 ts1 ts_type cal')
+EventInfoTSType = enum_func('fixed interval', mutex_flags=True)
+
+def cal_list_to_events(cal_list, ts_min, ts_max, state):
+	'''Process list of RST event sections
+		(dicts of string values) to a list of relevant EventInfo timespans.'''
+	ev_list = list()
+
+	for cal in map(adict, cal_list):
+		ts_list, ts0, ts1, ts_keys = cal.ts, cal.ts_start, cal.ts_end, set()
+		ts0, ts1 = map(conv_ts_utc, [ts0, ts1])
+		if ts1 and ts1 < ts0: ts1 = ts1.replace(year=ts1.year + 1)
+		if not ts_list: ts_list = [ts0]
+		ts_base = ts0, ts1
+
+		for n, ts in enumerate(ts_list):
+			if not ts: continue
+			(ts0, ts1), ts_list[n] = ts_base, None
+			ts_type = EventInfoTSType(fixed=isinstance(ts, dt.datetime))
+			if ts_type.fixed:
+				if ts0 and ts1 and ts != ts0:
+					log.warning( 'Ignoring fixed-time "ts" field for entry,'
+						' as "ts-start"/"ts-end" are used instead: {!r} [{}]', cal.title, ts )
+				elif not ts0: ts0 = conv_ts_utc(ts)
+			elif ts_type.interval:
+				ts0_k = state.key('cal.ts', cal.title, ts0, ts)
+				ts_keys.add(ts0_k)
+				if cal.get('_state_reset'): state.pop(ts0_k, None)
+				ts0_orig = conv_ts_utc(state.get(ts0_k))
+				ts0 = ts0_pre = ts0_orig or ts0 or ts_min
+				if ts1 and ts0 > ts1: # event ending in the past
+					ts0 = None
+					break
+				try:
+					while ts0 <= ts_min:
+						ts0_pre, ts0 = ts0, apply_ts_delta(ts0, ts, ts_max)
+				except TSOverflow: # no events within timespan
+					ts0 = None
+					break
+				if ts0_pre != ts0_orig: state[ts0_k] = ts0.timestamp()
+				if isinstance(ts, IntervalFilter) and not ts.time: # day spans
+					ts1 = ts0
+					while True: # iterate until span ends
+						try: ts1_next = apply_ts_delta(ts1, ts, ts_max)
+						except TSOverflow: break
+						if ts1_next != ts1 + delta_1d: break
+						ts1 = ts1_next
+					ts1 += delta_1d - delta_1s # extend until end of last day
+			else: raise ValueError(ts_type)
+
+			if not ts0: continue
+			if not ts1:
+				ts1 = ts0
+				if cal.duration: ts1 += cal.duration
+			if ts1 < ts_min or ts0 > ts_max: continue
+			ts_list[n] = ts0, ts1, ts_type
+
+		ts_list = list(filter(None, ts_list))
+
+		if log.isEnabledFor(logging.DEBUG):
+			log.debug('')
+			log.debug('----- title: {}', cal.title)
+			log.debug('  raw: ts={} start={} end={}', cal.raw_ts, cal.raw_ts_start, cal.raw_ts_end)
+			if ts_keys: log.debug('  ts-keys: {}', ' '.join(sorted(ts_keys)))
+			for ts0, ts1, *x in ts_list:
+				log.debug('  result [{}]:', repr_ts_diff(ts1 - ts0))
+				log.debug('    from: {}', repr_ts(ts0))
+				log.debug('    to:   {}', repr_ts(ts1))
+			urls = cal.get('url', list()) + cal.get('feed_rss', list())
+			for url in urls: log.debug('  url: {}', url)
+
+		for ts0, ts1, ts_type in ts_list:
+			ev_list.append(EventInfo(
+				conv_ts_local(ts0), conv_ts_local(ts1), ts_type, cal ))
+
+	return ev_list
+
+
+
+### Text-based output generators
 
 text_params_default = dict(
 	max_text_lines=9, max_text_break='[more]', max_text_color='d9374c',
@@ -787,10 +917,10 @@ def text_report_gen(dst, ts_now, day0, day1, events, text_params, conky=False):
 		plain_div, plain_strftime_len, plain_strftime = '- '*21, 16, ' %Y-%m-%d %a '
 	while day < day1:
 		day_events = list()
-		for ts0, ts1, cal in events:
-			if not ts0.date() <= day <= ts1.date(): continue
-			day_ts, tk, delta = text_event_time_repr(ts_now, day, ts0, ts1)
-			day_events.append((day_ts, tk, delta, cal))
+		for ev in events:
+			if not ev.ts0.date() <= day <= ev.ts1.date(): continue
+			day_ts, tk, delta = text_event_time_repr(ts_now, day, ev.ts0, ev.ts1)
+			day_events.append((day_ts, tk, delta, ev.cal))
 
 		if day_events and lines <= cc.max_text_lines:
 			day_start = True
@@ -966,7 +1096,6 @@ def main(args=None):
 		state_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
 		if state_path.exists(): state.load(json.loads(state_path.read_text()))
 	if opts.state_flush: state.clear()
-	state_reset_found, state_reset = False, opts.state_reset and opts.state_reset.lower()
 
 	if opts.ical:
 		import icalendar as ic # https://tools.ietf.org/html/rfc5545
@@ -974,98 +1103,36 @@ def main(args=None):
 		ical.add('prodid', '-//rst-icalendar-event-tracker//fraggod.net//EN')
 		ical.add('version', '2.0')
 	if opts.conky or opts.plain:
-		ev_list = list()
 		text_params = text_params_str_parse(opts.text_params)
 
 	ts_min = conv_ts_utc(parse_ts(opts.time_start, in_future=False))
 	ts_max = ts_min + parse_duration(opts.time_span)
 	cal_list, conf = parse_data_from_rst(rst_text.replace('\t', '  '))
 
-	# Loop: cal_list (events) -> ts_list (ts0-ts1 pairs)
-	for cal in map(adict, cal_list):
-		if opts.event and opts.event.lower() not in cal.title.lower(): continue
-
-		ts_list, ts0, ts1, ts_keys = cal.ts, cal.ts_start, cal.ts_end, set()
-		ts0, ts1 = map(conv_ts_utc, [ts0, ts1])
-		if ts1 and ts1 < ts0: ts1 = ts1.replace(year=ts1.year + 1)
-		if not ts_list: ts_list = [ts0]
-		ts_base = ts0, ts1
-
-		for n, ts in enumerate(ts_list):
-			if not ts: continue
-			(ts0, ts1), ts_list[n] = ts_base, None
-			if isinstance(ts, dt.datetime):
-				if ts0 and ts1 and ts != ts0:
-					log.warning( 'Ignoring fixed-time "ts" field for entry,'
-						' as "ts-start"/"ts-end" are used instead: {!r} [{}]', cal.title, ts )
-				elif not ts0: ts0 = conv_ts_utc(ts)
-			else:
-				ts0_k = state.key('cal.ts', cal.title, ts0, ts)
-				ts_keys.add(ts0_k)
-				if state_reset and state_reset in cal.title.lower():
-					state_reset_found = True
-					state.pop(ts0_k, None)
-				ts0_orig = conv_ts_utc(state.get(ts0_k))
-				ts0 = ts0_pre = ts0_orig or ts0 or ts_min
-				if ts1 and ts0 > ts1: # event ending in the past
-					ts0 = None
-					break
-				try:
-					while ts0 <= ts_min:
-						ts0_pre, ts0 = ts0, apply_ts_delta(ts0, ts, ts_max)
-				except TSOverflow: # no events within timespan
-					ts0 = None
-					break
-				if ts0_pre != ts0_orig: state[ts0_k] = ts0.timestamp()
-				if isinstance(ts, IntervalFilter) and not ts.time: # day spans
-					ts1 = ts0
-					while True: # iterate until span ends
-						try: ts1_next = apply_ts_delta(ts1, ts, ts_max)
-						except TSOverflow: break
-						if ts1_next != ts1 + delta_1d: break
-						ts1 = ts1_next
-					ts1 += delta_1d - delta_1s # extend until end of last day
-
-			if not ts0: continue
-			if not ts1:
-				ts1 = ts0
-				if cal.duration: ts1 += cal.duration
-			if ts1 < ts_min or ts0 > ts_max: continue
-			ts_list[n] = ts0, ts1
-
-		ts_list = list(filter(None, ts_list))
-
-		if log.isEnabledFor(logging.DEBUG):
-			log.debug('')
-			log.debug('----- title: {}', cal.title)
-			log.debug('  raw: ts={} start={} end={}', cal.raw_ts, cal.raw_ts_start, cal.raw_ts_end)
-			if ts_keys: log.debug('  ts-keys: {}', ' '.join(sorted(ts_keys)))
-			for ts0, ts1 in ts_list:
-				log.debug('  result [{}]:', repr_ts_diff(ts1 - ts0))
-				log.debug('    from: {}', repr_ts(ts0))
-				log.debug('    to:   {}', repr_ts(ts1))
-			urls = cal.get('url', list()) + cal.get('feed_rss', list())
-			for url in urls: log.debug('  url: {}', url)
-
-		for ts0, ts1 in ts_list:
-			if opts.ical:
-				ev = ic.Event()
-				ev.add('summary', cal.title)
-				ev.add('dtstart', conv_ts_local(ts0))
-				ev.add('dtend', conv_ts_local(ts1))
-				ev.add('dtstamp', conv_ts_local(ts_min))
-				if cal.get('url'): ev.add('url', cal.url)
-				ical.add_component(ev)
-			if opts.conky or opts.plain:
-				ev_list.append(EventInfo(
-					conv_ts_local(ts0), conv_ts_local(ts1), cal ))
-
-	if state_reset and not state_reset_found:
-		print( 'ERROR: Failed to find event title'
-			f' matching --state-reset option: {state_reset}', file=sys.stderr )
-		return 1
+	if opts.event:
+		ev_title = opts.event.lower()
+		cal_list = list(cal for cal in cal_list if ev_title in cal['title'].lower())
+	if opts.state_reset:
+		ev_title, ev_found = opts.state_reset.lower(), False
+		for cal in cal_list:
+			if ev_title in cal['title'].lower():
+				ev_found = cal['_state_reset'] = True
+		if not ev_found:
+			print( 'ERROR: Failed to find event title matching'
+				f' --state-reset option: {opts.state_reset}', file=sys.stderr )
+			return 1
+	ev_list = cal_list_to_events(cal_list, ts_min, ts_max, state)
 
 	if opts.ical:
+		ev_dtstamp = conv_ts_local(ts_min)
+		for ev_info in ev_list:
+			ev = ic.Event()
+			ev.add('summary', ev_info.cal.title)
+			ev.add('dtstart', ev_info.ts0)
+			ev.add('dtend', ev_info.ts1)
+			ev.add('dtstamp', ev_dtstamp)
+			if ev_info.cal.get('url'): ev.add('url', ev_info.cal.url)
+			ical.add_component(ev)
 		if ev:
 			path = str(pl.Path(opts.ical).expanduser())
 			log.debug('Generating resulting ICS file: {}', path)
