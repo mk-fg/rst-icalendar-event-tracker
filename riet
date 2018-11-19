@@ -6,7 +6,7 @@ import datetime as dt, collections as cs, pathlib as pl
 import contextlib, tempfile, stat, base64, hashlib, json
 
 import pytz
-# As-needed deps: docutils, icalendar
+# As-needed deps: docutils, icalendar, feedparser
 
 
 class LogMessage:
@@ -89,12 +89,15 @@ def safe_replacement(path, *open_args, mode=None, **open_kws):
 			try: os.unlink(tmp.name)
 			except OSError: pass
 
-def retries_within_timeout( tries, timeout, reverse=True,
-		backoff_func=lambda e,n: ((e**n-1)/e), slack_factor=1e-3 ):
+def retries_within_timeout(
+		tries, timeout, acc=True, reverse=False,
+		backoff_func=lambda e,n: 1.01*e*(n**1.3), slack_factor=1e-3 ):
 	'''Return list of delays to make exactly n tires within timeout.
 		Monotonic backoff_func(e, n) should return delay values in range
-			of ~0 (n=0) to infinity (n=inf), with backoff_func(e, 2) giving value >e.
+			of ~0 (n=0) to infinity (n=inf), with backoff_func(e, 1) giving value >e.
 		slack_factor is how close to timeout sum of resulting delays will be.'''
+	if timeout <= 0: return [0]
+	if tries <= 0: return [timeout]
 	a, b, slack = 0, timeout, timeout * slack_factor
 	while True:
 		m = (a + b) / 2
@@ -103,6 +106,11 @@ def retries_within_timeout( tries, timeout, reverse=True,
 		if abs(error) < slack: break
 		elif error > 0: b = m
 		else: a = m
+	if acc:
+		delta = 0
+		for n, d in enumerate(delays):
+			delta += d
+			delays[n] = delta
 	if reverse: delays = list((timeout - d) for d in reversed(delays))
 	return delays
 
@@ -765,10 +773,43 @@ def parse_data_from_rst(rst_str):
 
 
 
-### RST calendar entries processing
+### Calendar data processing, feeds, etc
 
-EventInfo = cs.namedtuple('EventInfo', 'ts0 ts1 ts_type cal')
+EventInfo = cs.namedtuple('EventInfo', 'ts0 ts1 ts0_last ts_type cal')
 EventInfoTSType = enum_func('fixed interval', mutex_flags=True)
+
+conf_defaults = dict(
+	version='1.0',
+	feed_user_agent='riet/{ver} (rst-icalendar-event-tracker) feedparser/{ver_fp}',
+	feed_interval_checks=5,
+	feed_check_before_fixed_ts=delta_1d,
+	feed_check_after_fixed_ts=delta_1d,
+	feed_check_min_interval=dt.timedelta(seconds=60),
+	dnote_enabled=True, dnote_icon='', dnote_timeout=-1, dnote_app='riet', dnote_urgency=1 )
+
+def conf_parse_bool(v, _states={
+		'1': True, 'yes': True, 'y': True, 'true': True, 'on': True,
+		'0': False, 'no': False, 'n': False, 'false': False, 'off': False }):
+	try: return _states[v.strip().lower()]
+	except KeyError: raise ValueError(v)
+
+def conf_update(conf, update):
+	conf = adict(conf.copy())
+	for k, v in (update or dict()).items():
+		if k.startswith('_'): continue
+		k = k.replace('-', '_')
+		v_def = conf_defaults.get(k)
+		if v_def is None: continue
+		if isinstance(v, list): v = v[-1]
+		if isinstance(v_def, str): pass
+		elif isinstance(v_def, bool): v = conf_parse_bool(v)
+		elif isinstance(v_def, int): v = int(v)
+		elif isinstance(v_def, dt.timedelta): v = parse_duration(v)
+		else: continue
+		conf[k] = v
+	if conf.feed_interval_checks <= 0:
+		conf.feed_interval_checks = 0
+	return conf
 
 def cal_list_to_events(cal_list, ts_min, ts_max, state):
 	'''Process list of RST event sections
@@ -784,19 +825,21 @@ def cal_list_to_events(cal_list, ts_min, ts_max, state):
 
 		for n, ts in enumerate(ts_list):
 			if not ts: continue
-			(ts0, ts1), ts_list[n] = ts_base, None
+			(ts0, ts1), ts_list[n], ts0_last = ts_base, None, None
 			ts_type = EventInfoTSType(fixed=isinstance(ts, dt.datetime))
+
 			if ts_type.fixed:
 				if ts0 and ts1 and ts != ts0:
 					log.warning( 'Ignoring fixed-time "ts" field for entry,'
 						' as "ts-start"/"ts-end" are used instead: {!r} [{}]', cal.title, ts )
 				elif not ts0: ts0 = conv_ts_utc(ts)
+
 			elif ts_type.interval:
 				ts0_k = state.key('cal.ts', cal.title, ts0, ts)
 				ts_keys.add(ts0_k)
 				if cal.get('_state_reset'): state.pop(ts0_k, None)
-				ts0_orig = conv_ts_utc(state.get(ts0_k))
-				ts0 = ts0_pre = ts0_orig or ts0 or ts_min
+				ts0_last = conv_ts_utc(state.get(ts0_k))
+				ts0 = ts0_pre = ts0_last or ts0 or ts_min
 				if ts1 and ts0 > ts1: # event ending in the past
 					ts0 = None
 					break
@@ -806,7 +849,7 @@ def cal_list_to_events(cal_list, ts_min, ts_max, state):
 				except TSOverflow: # no events within timespan
 					ts0 = None
 					break
-				if ts0_pre != ts0_orig: state[ts0_k] = ts0.timestamp()
+				if ts0_pre != ts0_last: state[ts0_k] = ts0_last = ts0_pre.timestamp()
 				if isinstance(ts, IntervalFilter) and not ts.time: # day spans
 					ts1 = ts0
 					while True: # iterate until span ends
@@ -815,6 +858,7 @@ def cal_list_to_events(cal_list, ts_min, ts_max, state):
 						if ts1_next != ts1 + delta_1d: break
 						ts1 = ts1_next
 					ts1 += delta_1d - delta_1s # extend until end of last day
+
 			else: raise ValueError(ts_type)
 
 			if not ts0: continue
@@ -822,7 +866,7 @@ def cal_list_to_events(cal_list, ts_min, ts_max, state):
 				ts1 = ts0
 				if cal.duration: ts1 += cal.duration
 			if ts1 < ts_min or ts0 > ts_max: continue
-			ts_list[n] = ts0, ts1, ts_type
+			ts_list[n] = ts0, ts1, ts0_last, ts_type
 
 		ts_list = list(filter(None, ts_list))
 
@@ -838,11 +882,87 @@ def cal_list_to_events(cal_list, ts_min, ts_max, state):
 			urls = cal.get('url', list()) + cal.get('feed_rss', list())
 			for url in urls: log.debug('  url: {}', url)
 
-		for ts0, ts1, ts_type in ts_list:
+		for ts0, ts1, ts0_last, ts_type in ts_list:
 			ev_list.append(EventInfo(
-				conv_ts_local(ts0), conv_ts_local(ts1), ts_type, cal ))
+				conv_ts_local(ts0), conv_ts_local(ts1), ts0_last, ts_type, cal ))
 
 	return ev_list
+
+def check_feeds(ev_list, conf, state):
+	import feedparser
+
+	ts_now = dt.datetime.utcnow().replace(tzinfo=pytz.utc)
+	conf_base = conf
+	notify_func = lambda title, body, func=get_dbus_notify_func(): func(
+		title, body, icon=conf.dnote_icon, timeout=conf.dnote_timeout,
+		app=conf.dnote_app, hints=dict(urgency=conf.dnote_urgency) )
+
+	for ev in ev_list:
+		if not ev.cal.get('feed_rss'): continue
+
+		ts0_last, ts0, ts1 = map(conv_ts_utc, [ev.ts0_last, ev.ts0, ev.ts1])
+		conf = conf_update(conf_base, ev.cal)
+		feed_url, feed_ua = ( ev.cal.feed_rss[-1],
+			conf.feed_user_agent.format(ver=conf.version, ver_fp=feedparser.__version__) )
+
+		check_ts_list, check_n = [ts0, ts1], conf.feed_interval_checks + 1
+		if ev.ts_type.interval and conf.feed_interval_checks:
+			check_ts_list.extend(
+				(ts0_last + dt.timedelta(seconds=delta)) for delta in
+					retries_within_timeout(check_n, (ts1 - ts0_last).total_seconds(), reverse=True) )
+		if conf.feed_check_before_fixed_ts:
+			check_ts_list.extend(
+				(ts0 - dt.timedelta(seconds=delta)) for delta in
+				retries_within_timeout( check_n,
+					conf.feed_check_before_fixed_ts.total_seconds(), reverse=True ) )
+		if conf.feed_check_after_fixed_ts:
+			check_ts_list.extend(
+				(ts1 + dt.timedelta(seconds=delta)) for delta in
+				retries_within_timeout( check_n,
+					conf.feed_check_after_fixed_ts.total_seconds() ) )
+
+		fk_ts = state.key('feed.ts', feed_url)
+		if ev.cal.get('_state_reset'): state.pop(fk_ts, None)
+		check_ts_last = conv_ts_utc(state.get(fk_ts, 0)) + conf.feed_check_min_interval
+		for n, ts in enumerate(check_ts_list): check_ts_list[n] = ts.replace(microsecond=0)
+
+		check = False
+		for ts in sorted(check_ts_list):
+			if ts > ts_now: break
+			if check_ts_last >= ts: continue
+			check = True # at least one scheduled check is in the past
+			break
+		if not check: continue
+
+		fk_last_id, fk_etag = (
+			state.key(k, feed_url) for k in ['feed.last-id', 'feed.etag'] )
+		if ev.cal.get('_state_reset'):
+			for k in fk_last_id, fk_etag: state.pop(k, None)
+		feed_etag = state.get(fk_etag, '')
+		log.debug('Fetching feed: {} (etag={!r})', feed_url, feed_etag)
+		feed = feedparser.parse(feed_url, agent=feed_ua, etag=feed_etag)
+		status, bozo, bozo_err = (
+			feed.get(k) for k in ['status', 'bozo', 'bozo_exception'] )
+		if status >= 400 or (not status and bozo):
+			log.info('Failed to fetch feed (status={}): {} - {}', status, feed_url, bozo_err)
+			continue # check_ts_last not updated
+		if status != 304:
+			etag = feed.get('etag')
+			if etag and etag != feed_etag: state[fk_etag] = etag
+			entry = feed.entries[0]
+			entry_id_ver, entry_id = 'id.1', None
+			for k in 'id', 'title', 'link', 'published', 'modified', 'created':
+				entry_id = entry.get(k)
+				if entry_id: break
+			if entry_id:
+				entry_id = tuple_hash((entry_id_ver, entry_id))
+				if entry_id == state.get(fk_last_id): entry = None
+				state[fk_last_id] = entry_id
+			else: log.warning('Failed to get id for feed [{}] entry: {}', feed_url, entry)
+			if entry and conf.dnote_enabled:
+				log.debug('  new entry (etag={!r}): {!r}', etag, entry_id)
+				notify_func(f'Feed update: {ev.cal.title}  ', f'New entry: {entry.title}')
+		state[fk_ts] = ts_now.timestamp()
 
 
 
@@ -1033,6 +1153,8 @@ def main(args=None):
 				overidden on per-item basis via :conky: parameter in rst.
 			Default parameters are:\n{}'''.format(
 				text_fill(text_params_default_str, len(text_params_default_str) // 5 - 5, '\t'*4) ))
+	group.add_argument('-f', '--feeds', action='store_true',
+		help='Check any embedded feed URLs and notify about any updates there.')
 
 	group = parser.add_argument_group('Event filtering')
 	group.add_argument('-e', '--event', metavar='title-part',
@@ -1116,6 +1238,7 @@ def main(args=None):
 	ts_min = conv_ts_utc(parse_ts(opts.time_start, in_future=False))
 	ts_max = ts_min + parse_duration(opts.time_span)
 	cal_list, conf = parse_data_from_rst(rst_text.replace('\t', '  '))
+	conf = conf_update(conf_defaults, conf)
 
 	if opts.event:
 		ev_title = opts.event.lower()
@@ -1130,6 +1253,8 @@ def main(args=None):
 				f' --state-reset option: {opts.state_reset}', file=sys.stderr )
 			return 1
 	ev_list = cal_list_to_events(cal_list, ts_min, ts_max, state)
+
+	if opts.feeds: check_feeds(ev_list, conf, state)
 
 	if opts.ical:
 		ev_dtstamp = conv_ts_local(ts_min)

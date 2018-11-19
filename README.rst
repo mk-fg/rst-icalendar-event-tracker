@@ -47,7 +47,7 @@ Usage
 - Install script requirements (see below): ``pip install --user docutils pytz``
 
 - Write free-form rst file with some sections containing some event descriptions
-  (see `cal.rst <cal.rst>`_ example)::
+  (see `cal.rst <cal.rst>`_ doc/example)::
 
     Minor chores
     ------------
@@ -102,15 +102,10 @@ Requirements
 * `docutils module <https://docutils.readthedocs.io/>`_ - rst parser.
 * `pytz <http://pytz.sourceforge.net/>`_ - parsing timezones, also a dep for icalendar.
 * `icalendar module <https://pypi.org/project/icalendar/>`_ - only when generating .ics files with -i/--ical option.
+* `feedparser module <https://pypi.org/project/feedparser/>`_ - only for fetching feeds with -f/--feeds option.
 
 
 TODO
 ----
-
-- Recurring URL and RSS feed update checks,
-  showing events from items with these only after updates,
-  with titles derived from such updates.
-
-- Desktop and maybe other event notifications.
 
 - Maybe some auto-cleanup for passed one-off entries in rst file?

@@ -9,7 +9,7 @@ and is detected by having ``:config: 1`` value defined somewhere in it.
 
 Feed options (e.g. ``:feed-rss:``):
 
-  :feed-interval-checks: 3
+  :feed-interval-checks: 5
 
   Make three *additional* checks within specified interval (if any),
   spaced exponentially from the end of it, when last check is made.
@@ -20,10 +20,42 @@ Feed options (e.g. ``:feed-rss:``):
   This should always be set unless --time-start in the past is used,
   as otherwise there will never be past events eligible for feed checks.
 
-  :feed-check-for: 10d
+  Default: 5
 
-  Specifies how long to check feeds after one-off events.
-  Only applies to these.
+  :feed-check-before-fixed-ts: 1d
+
+  Specifies when to do additional checks for fixed-time events.
+  Same format as ``:duration:``. Only one successful check is performed for these.
+
+  ``:feed-interval-checks:`` will be performed in this interval,
+  using exponential backoff algo for spacing, in reverse to how they're
+  spaced within interval between events.
+
+  Same as with ``:feed-interval-checks:``, should be set unless --time-start is
+  in the past, as otherwise these checks will always be missed, due to either
+  event falling outside of processed time interval or check still in the future.
+
+  Default: 1d
+
+  :feed-check-after-fixed-ts: 1d
+
+  | Same as ``:feed-check-before-fixed-ts:``, but for extra checks after event.
+  | Only used if --time-start is set in the past.
+
+  Default: 1d
+
+Desktop notification options:
+
+  :dnote-enabled: true
+  :dnote-icon: nwn
+  :dnote-timeout: 0
+  :dnote-app: riet
+  :dnote-urgency: 2
+
+  | Options for desktop notifications, as per D-Bus protocol spec.
+  | Use ``:dnote-enabled: false`` to disable them entirely.
+  | Default-enabled, options are protocol/daemon defaults.
+
 
 
 
@@ -187,8 +219,8 @@ Podcasts
 
   Note:
 
-    specified feed-rss will be checked and current event created only when new
-    items there are detected.
+    Specified feed-rss will be checked only if event falls within output
+    timespan. See also ``:feed-interval-checks:`` option.
 
   .. TODO: implement url/feed checks
   .. TODO: note on options with parameters for such event and feed checks.
