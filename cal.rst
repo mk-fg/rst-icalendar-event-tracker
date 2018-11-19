@@ -1,3 +1,21 @@
+Common Configuration
+--------------------
+
+This section can appear anywhere (maybe multiple times),
+options in which apply to the whole file,
+and is detected by having ``:config: 1`` value defined somewhere in it.
+
+:config: 1
+
+Feed options (for e.g. ``:feed-rss:``):
+
+  :feed-interval-checks: 3
+
+  Make three *additional* checks within specified interval,
+  spaced exponentially from the end of it (when last check is made).
+
+
+
 One-off event reminders
 -----------------------
 

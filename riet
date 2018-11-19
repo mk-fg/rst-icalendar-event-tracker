@@ -598,7 +598,7 @@ def apply_ts_delta( ts, delta,
 
 ### ReST parser
 
-def parse_cal_list_from_rst(rst_str):
+def parse_data_from_rst(rst_str):
 	from docutils import frontend as rst_front
 	from docutils.parsers import rst
 	import docutils.utils as rst_utils
@@ -608,6 +608,12 @@ def parse_cal_list_from_rst(rst_str):
 
 	def rst_lookup( root, tag,
 			default=RstLookupError, recursive=False, one=True, text=True ):
+		'''Find tagged element(s) inside a "root" element.
+			"tag" can be multiple space-separated tags for path or end
+				with "..." to use one=False (find all elements, not just the first one).
+			RstLookupError is raised if nothing was found.
+			one=False returns non-empty list instead of element/text.
+			text=True does element.astext() conversion.'''
 		res, opts = list(), dict(one=one, recursive=recursive)
 		tag = tag.split()
 		if len(tag) > 1:
@@ -667,9 +673,19 @@ def parse_cal_list_from_rst(rst_str):
 				if k != 'duration' else parse_duration )(ts_str_norm(res[k][0]))
 		return res
 
-	def rst_cal_list(root, depth=0, sections=None, cals=None):
-		if cals is None: cals = list()
+	def rst_config(root):
+		conf = dict()
+		try: fields = rst_lookup(root, 'field_list...', text=False)
+		except RstLookupError: return conf
+		for e in rst_lookup(fields, 'field...', text=False):
+			key = rst_lookup(e, 'field_name').replace('-', '_')
+			conf.setdefault(key, list()).append(rst_lookup(e, 'field_body paragraph'))
+		return conf
+
+	def rst_cal_list(root, depth=0, sections=None, cals=None, conf=None):
 		if not sections: sections = list()
+		if cals is None: cals = list()
+		if conf is None: conf = dict()
 		for e in root.children:
 			e_sec = None
 			if e.tagname == 'section':
@@ -681,8 +697,9 @@ def parse_cal_list_from_rst(rst_str):
 						if e_sec else rst_lookup(e, 'paragraph') )
 				cal_info['path'] = sections
 				cals.append(cal_info)
-			rst_cal_list(e, depth+1, e_sec or sections, cals)
-		return cals
+			else: conf.update(rst_config(e))
+			rst_cal_list(e, depth+1, e_sec or sections, cals, conf)
+		return cals, conf
 
 	settings = rst_front.OptionParser(components=(rst.Parser,)).get_default_values()
 	rst_tree = rst_utils.new_document('cal_list', settings)
@@ -962,7 +979,7 @@ def main(args=None):
 
 	ts_min = conv_ts_utc(parse_ts(opts.time_start, in_future=False))
 	ts_max = ts_min + parse_duration(opts.time_span)
-	cal_list = parse_cal_list_from_rst(rst_text.replace('\t', '  '))
+	cal_list, conf = parse_data_from_rst(rst_text.replace('\t', '  '))
 
 	# Loop: cal_list (events) -> ts_list (ts0-ts1 pairs)
 	for cal in map(adict, cal_list):
