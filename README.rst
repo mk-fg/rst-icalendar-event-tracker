@@ -108,4 +108,6 @@ Requirements
 TODO
 ----
 
+- Make feed updates affect output events, e.g. set/update titles and times.
+
 - Maybe some auto-cleanup for passed one-off entries in rst file?
