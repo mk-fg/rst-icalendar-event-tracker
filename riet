@@ -943,7 +943,7 @@ def check_feeds(ev_list, conf, state):
 		feed = feedparser.parse(feed_url, agent=feed_ua, etag=feed_etag)
 		status, bozo, bozo_err = (
 			feed.get(k) for k in ['status', 'bozo', 'bozo_exception'] )
-		if status >= 400 or (not status and bozo):
+		if (not status and bozo) or (status or 1000) >= 400:
 			log.info('Failed to fetch feed (status={}): {} - {}', status, feed_url, bozo_err)
 			continue # check_ts_last not updated
 		if status != 304:
