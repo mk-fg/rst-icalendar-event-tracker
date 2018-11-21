@@ -923,9 +923,12 @@ def check_feeds(ev_list, conf, state, ts_max):
 
 		check_ts_list, check_n = [ts0, ts1], conf.feed_interval_checks + 1
 		if ev.ts_type.interval and conf.feed_interval_checks:
-			check_ts_list.extend(
-				(ts0_last + dt.timedelta(seconds=delta)) for delta in
-					retries_within_timeout(check_n, (ts1 - ts0_last).total_seconds(), reverse=True) )
+			if ts0_last == ts1 and not state.get(fk_ts): # immediate first fetch
+				check_ts_list.append(ts_now - conf.feed_check_min_interval)
+			else:
+				check_ts_list.extend(
+					(ts0_last + dt.timedelta(seconds=delta)) for delta in
+						retries_within_timeout(check_n, (ts1 - ts0_last).total_seconds(), reverse=True) )
 		if conf.feed_check_before_fixed_ts:
 			check_ts_list.extend(
 				(ts0 - dt.timedelta(seconds=delta)) for delta in
@@ -946,13 +949,16 @@ def check_feeds(ev_list, conf, state, ts_max):
 			break
 		if log.isEnabledFor(logging.DEBUG):
 			log.debug('Feed checks for: {} [{}]', ev.cal.title, feed_url)
-			for ts in sorted(set(check_ts_list + [ts_now, ts_entry, check_ts_last])):
-				pointer = ''
-				if ts == check_ts_last: pointer += ' <--- last checked'
-				if ts == ts_entry: pointer += ' <--- last entry'
-				if ts == ts_now: pointer += ' <--- now'
-				if ts == check: pointer += ' <--- scheduled to run'
-				log.debug('  {}{}', repr_ts(ts), pointer)
+			ts_extra = {
+				'now': ts_now, 'last entry': ts_entry, 'last checked': check_ts_last,
+				'ev-start': ts0, 'ev-end': ts1, 'ev-start-past': ts0_last }
+			for ts in sorted(set(check_ts_list + list(ts_extra.values()))):
+				pointer = list()
+				for k, v in ts_extra.items():
+					if ts == v: pointer.append(k)
+				if ts == check: pointer.append('scheduled to run')
+				if pointer: pointer = (' <--- ' + ', '.join(pointer))
+				log.debug('  {}{}', repr_ts(ts), pointer or '')
 		if not check: continue
 
 		fk_last_id, fk_etag = (
