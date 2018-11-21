@@ -775,7 +775,7 @@ def parse_data_from_rst(rst_str):
 
 ### Calendar data processing, feeds, etc
 
-EventInfo = cs.namedtuple('EventInfo', 'ts0 ts1 ts0_last ts_type cal')
+EventInfo = cs.namedtuple('EventInfo', 'ts0 ts1 cal ts_type ts0_last ts_interval')
 EventInfoTSType = enum_func('fixed interval', mutex_flags=True)
 
 conf_defaults = dict(
@@ -866,7 +866,7 @@ def cal_list_to_events(cal_list, ts_min, ts_max, state):
 				ts1 = ts0
 				if cal.duration: ts1 += cal.duration
 			if ts1 < ts_min or ts0 > ts_max: continue
-			ts_list[n] = ts0, ts1, ts0_last, ts_type
+			ts_list[n] = ts0, ts1, ts_type, ts0_last, ts_type.interval and ts
 
 		ts_list = list(filter(None, ts_list))
 
@@ -875,16 +875,15 @@ def cal_list_to_events(cal_list, ts_min, ts_max, state):
 			log.debug('----- title: {}', cal.title)
 			log.debug('  raw: ts={} start={} end={}', cal.raw_ts, cal.raw_ts_start, cal.raw_ts_end)
 			if ts_keys: log.debug('  ts-keys: {}', ' '.join(sorted(ts_keys)))
-			for ts0, ts1, *x in ts_list:
+			for ts0, ts1, *ev_info in ts_list:
 				log.debug('  result [{}]:', repr_ts_diff(ts1 - ts0))
 				log.debug('    from: {}', repr_ts(ts0))
 				log.debug('    to:   {}', repr_ts(ts1))
 			urls = cal.get('url', list()) + cal.get('feed_rss', list())
 			for url in urls: log.debug('  url: {}', url)
 
-		for ts0, ts1, ts0_last, ts_type in ts_list:
-			ev_list.append(EventInfo(
-				conv_ts_local(ts0), conv_ts_local(ts1), ts0_last, ts_type, cal ))
+		for ts0, ts1, *ev_info in ts_list:
+			ev_list.append(EventInfo(conv_ts_local(ts0), conv_ts_local(ts1), cal, *ev_info))
 
 	return ev_list
 
@@ -900,10 +899,25 @@ def check_feeds(ev_list, conf, state):
 	for ev in ev_list:
 		if not ev.cal.get('feed_rss'): continue
 
-		ts0_last, ts0, ts1 = map(conv_ts_utc, [ev.ts0_last, ev.ts0, ev.ts1])
 		conf = conf_update(conf_base, ev.cal)
 		feed_url, feed_ua = ( ev.cal.feed_rss[-1],
 			conf.feed_user_agent.format(ver=conf.version, ver_fp=feedparser.__version__) )
+		fk_ts, fk_ts_ev = (state.key(k, feed_url) for k in ['feed.ts', 'feed.ts-ev'])
+		if ev.cal.get('_state_reset'):
+			for k in fk_ts, fk_ts_ev: state.pop(k, None)
+		check_ts_last = conv_ts_utc(state.get(fk_ts, 0)) + conf.feed_check_min_interval
+		check_ts_ev = state.get(fk_ts_ev) # id(ts0, ts1) for which last entry was fetched
+		ts0_last, ts0, ts1 = map(conv_ts_utc, [ev.ts0_last, ev.ts0, ev.ts1])
+
+		ts_ev = tuple_hash((int(ts0.timestamp()), int(ts1.timestamp())))
+		if ts_ev == check_ts_ev:
+			if ev.ts_type.fixed: continue
+			if ev.ts_type.interval:
+				try:
+					ts0_last, ts0 = ( check_ts_last,
+						apply_ts_delta(ts0, ev.ts_interval, ts0 + 2 * (ts0 - ts0_last)) )
+					ts1 = ts0
+				except TSOverflow: continue # wait for proper next ts0 before fetch
 
 		check_ts_list, check_n = [ts0, ts1], conf.feed_interval_checks + 1
 		if ev.ts_type.interval and conf.feed_interval_checks:
@@ -920,10 +934,6 @@ def check_feeds(ev_list, conf, state):
 				(ts1 + dt.timedelta(seconds=delta)) for delta in
 				retries_within_timeout( check_n,
 					conf.feed_check_after_fixed_ts.total_seconds() ) )
-
-		fk_ts = state.key('feed.ts', feed_url)
-		if ev.cal.get('_state_reset'): state.pop(fk_ts, None)
-		check_ts_last = conv_ts_utc(state.get(fk_ts, 0)) + conf.feed_check_min_interval
 		for n, ts in enumerate(check_ts_list): check_ts_list[n] = ts.replace(microsecond=0)
 
 		check = False
@@ -957,7 +967,7 @@ def check_feeds(ev_list, conf, state):
 			if entry_id:
 				entry_id = tuple_hash((entry_id_ver, entry_id))
 				if entry_id == state.get(fk_last_id): entry = None
-				state[fk_last_id] = entry_id
+				state[fk_last_id], state[fk_ts_ev] = entry_id, ts_ev
 			else: log.warning('Failed to get id for feed [{}] entry: {}', feed_url, entry)
 			if entry and conf.dnote_enabled:
 				log.debug('  new entry (etag={!r}): {!r}', etag, entry_id)
