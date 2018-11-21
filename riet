@@ -146,12 +146,12 @@ class PersistentState(cs.UserDict):
 
 	def __init__(self, *args, **kws):
 		super().__init__(*args, **kws)
-		self.ts_init = time.time()
+		self.ts = self.ts_init = time.time()
 
 	def key(self, ns, *tt): return f'{ns}.{tuple_hash(tt)}'
 
 	def __setitem__(self, k, v):
-		return super().__setitem__(k, (time.time(), v))
+		return super().__setitem__(k, (self.ts, v))
 	def __getitem__(self, k):
 		v = super().__getitem__(k)[1]
 		self[k] = v # update ts
@@ -174,7 +174,7 @@ class PersistentState(cs.UserDict):
 		return dict(version=self.version, ts_init=self.ts_init, data=self.data)
 
 	def cleanup(self, ts_min=None, timeout=2*365*24*3600):
-		if ts_min is None: ts_min = time.time() - timeout
+		if ts_min is None: ts_min = self.ts - timeout
 		for k, v in list(self.data.items()):
 			if v[0] < ts_min: self.data.pop(k)
 
