@@ -117,14 +117,15 @@ def retries_within_timeout(
 str_hash = lambda p: base64.urlsafe_b64encode(
 	hashlib.blake2s(str(p).encode(), key=b'riet.path_hash').digest() ).decode()[:12]
 
-def tuple_hash(data):
+def tuple_hash(*data):
+	if len(data) == 1 and isinstance(data[0], (tuple, list)): data = data[0]
 	src = list()
 	for v in data:
 		if v is None: src.append('\ue003')
 		elif isinstance(v, (int, str, dt.tzinfo)): src.append(str(v))
-		elif isinstance(v, tuple): src.append(tuple_hash(v))
+		elif isinstance(v, (tuple, list)): src.append(tuple_hash(v))
 		elif isinstance(v, dt.datetime):
-			src.append(conv_ts_utc(v).strftime('%Y-%m-%dT%H:%M:%S.%f'))
+			src.append(conv_ts_utc(v).strftime('%Y-%m-%dT%H:%M:%S'))
 		elif isinstance(v, dt.timedelta): src.append('\ue002{v.total_seconds()}')
 		elif isinstance(v, set): src.append(tuple_hash(sorted(v)))
 		else: raise ValueError(type(v), v)
@@ -887,7 +888,7 @@ def cal_list_to_events(cal_list, ts_min, ts_max, state):
 
 	return ev_list
 
-def check_feeds(ev_list, conf, state):
+def check_feeds(ev_list, conf, state, ts_max):
 	import feedparser
 
 	ts_now = dt.datetime.utcnow().replace(tzinfo=pytz.utc)
@@ -902,22 +903,23 @@ def check_feeds(ev_list, conf, state):
 		conf = conf_update(conf_base, ev.cal)
 		feed_url, feed_ua = ( ev.cal.feed_rss[-1],
 			conf.feed_user_agent.format(ver=conf.version, ver_fp=feedparser.__version__) )
-		fk_ts, fk_ts_ev = (state.key(k, feed_url) for k in ['feed.ts', 'feed.ts-ev'])
+		fk_ts, fk_ts_ev, fk_ts_entry = (
+			state.key(k, feed_url) for k in ['feed.ts', 'feed.ts-ev', 'feed.ts-entry'] )
 		if ev.cal.get('_state_reset'):
-			for k in fk_ts, fk_ts_ev: state.pop(k, None)
+			for k in fk_ts, fk_ts_ev, fk_ts_entry: state.pop(k, None)
 		check_ts_last = conv_ts_utc(state.get(fk_ts, 0)) + conf.feed_check_min_interval
-		check_ts_ev = state.get(fk_ts_ev) # id(ts0, ts1) for which last entry was fetched
+		ts_ev_last, ts_entry = state.get(fk_ts_ev), conv_ts_utc(state.get(fk_ts_entry, 0))
 		ts0_last, ts0, ts1 = map(conv_ts_utc, [ev.ts0_last, ev.ts0, ev.ts1])
 
-		ts_ev = tuple_hash((int(ts0.timestamp()), int(ts1.timestamp())))
-		if ts_ev == check_ts_ev:
+		ts_ev = tuple_hash(ts0, ts1) # id(ts0, ts1) for which last entry was fetched
+		if ts_ev == ts_ev_last:
 			if ev.ts_type.fixed: continue
 			if ev.ts_type.interval:
-				try:
-					ts0_last, ts0 = ( check_ts_last,
-						apply_ts_delta(ts0, ev.ts_interval, ts0 + 2 * (ts0 - ts0_last)) )
-					ts1 = ts0
-				except TSOverflow: continue # wait for proper next ts0 before fetch
+				if conf.feed_interval_checks: # spread-out checks until next ts0
+					try: ts0 = ts1 = apply_ts_delta(ts0, ev.ts_interval, ts_max)
+					except TSOverflow: continue
+				elif ( -conf.feed_check_after_fixed_ts <= # last fetched item is close enough
+					ts0 - ts_entry <= conf.feed_check_before_fixed_ts ): continue
 
 		check_ts_list, check_n = [ts0, ts1], conf.feed_interval_checks + 1
 		if ev.ts_type.interval and conf.feed_interval_checks:
@@ -940,8 +942,17 @@ def check_feeds(ev_list, conf, state):
 		for ts in sorted(check_ts_list):
 			if ts > ts_now: break
 			if check_ts_last >= ts: continue
-			check = True # at least one scheduled check is in the past
+			check = ts # at least one scheduled check is in the past
 			break
+		if log.isEnabledFor(logging.DEBUG):
+			log.debug('Feed checks for: {} [{}]', ev.cal.title, feed_url)
+			for ts in sorted(set(check_ts_list + [ts_now, ts_entry, check_ts_last])):
+				pointer = ''
+				if ts == check_ts_last: pointer += ' <--- last checked'
+				if ts == ts_entry: pointer += ' <--- last entry'
+				if ts == ts_now: pointer += ' <--- now'
+				if ts == check: pointer += ' <--- scheduled to run'
+				log.debug('  {}{}', repr_ts(ts), pointer)
 		if not check: continue
 
 		fk_last_id, fk_etag = (
@@ -965,9 +976,10 @@ def check_feeds(ev_list, conf, state):
 				entry_id = entry.get(k)
 				if entry_id: break
 			if entry_id:
-				entry_id = tuple_hash((entry_id_ver, entry_id))
+				entry_id = tuple_hash(entry_id_ver, entry_id)
 				if entry_id == state.get(fk_last_id): entry = None
-				state[fk_last_id], state[fk_ts_ev] = entry_id, ts_ev
+				state[fk_last_id] = entry_id
+				state[fk_ts_ev], state[fk_ts_entry] = ts_ev, ts_now.timestamp()
 			else: log.warning('Failed to get id for feed [{}] entry: {}', feed_url, entry)
 			if entry and conf.dnote_enabled:
 				log.debug('  new entry (etag={!r}): {!r}', etag, entry_id)
@@ -1264,7 +1276,7 @@ def main(args=None):
 			return 1
 	ev_list = cal_list_to_events(cal_list, ts_min, ts_max, state)
 
-	if opts.feeds: check_feeds(ev_list, conf, state)
+	if opts.feeds: check_feeds(ev_list, conf, state, ts_max)
 
 	if opts.ical:
 		ev_dtstamp = conv_ts_local(ts_min)
