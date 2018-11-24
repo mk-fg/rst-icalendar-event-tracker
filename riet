@@ -983,9 +983,10 @@ def check_feeds(ev_list, conf, state, ts_max):
 				if entry_id: break
 			if entry_id:
 				entry_id = tuple_hash(entry_id_ver, entry_id)
-				if entry_id == state.get(fk_last_id): entry = None
-				state[fk_last_id] = entry_id
-				state[fk_ts_ev], state[fk_ts_entry] = ts_ev, ts_now.timestamp()
+				if entry_id != state.get(fk_last_id):
+					state[fk_last_id] = entry_id
+					state[fk_ts_ev], state[fk_ts_entry] = ts_ev, ts_now.timestamp()
+				else: entry = None
 			else: log.warning('Failed to get id for feed [{}] entry: {}', feed_url, entry)
 			if entry and conf.dnote_enabled:
 				log.debug('  new entry (etag={!r}): {!r}', etag, entry_id)
