@@ -890,108 +890,108 @@ def cal_list_to_events(cal_list, ts_min, ts_max, state):
 
 def check_feeds(ev_list, conf, state, ts_max):
 	import feedparser
-
 	ts_now = dt.datetime.utcnow().replace(tzinfo=pytz.utc)
-	conf_base = conf
 	notify_func = lambda title, body, func=get_dbus_notify_func(): func(
 		title, body, icon=conf.dnote_icon, timeout=conf.dnote_timeout,
 		app=conf.dnote_app, hints=dict(urgency=conf.dnote_urgency) )
-
 	for ev in ev_list:
-		if not ev.cal.get('feed_rss'): continue
+		_check_feed(feedparser, ts_now, notify_func, ev, conf, state, ts_max)
 
-		conf = conf_update(conf_base, ev.cal)
-		feed_url, feed_ua = ( ev.cal.feed_rss[-1],
-			conf.feed_user_agent.format(ver=conf.version, ver_fp=feedparser.__version__) )
-		fk_ts, fk_ts_ev, fk_ts_entry = (
-			state.key(k, feed_url) for k in ['feed.ts', 'feed.ts-ev', 'feed.ts-entry'] )
-		if ev.cal.get('_state_reset'):
-			for k in fk_ts, fk_ts_ev, fk_ts_entry: state.pop(k, None)
-		check_ts_last = conv_ts_utc(state.get(fk_ts, 0)) + conf.feed_check_min_interval
-		ts_ev_last, ts_entry = state.get(fk_ts_ev), conv_ts_utc(state.get(fk_ts_entry, 0))
-		ts0_last, ts0, ts1 = map(conv_ts_utc, [ev.ts0_last, ev.ts0, ev.ts1])
+def _check_feed(fp, ts_now, notify_func, ev, conf_base, state, ts_max):
+	if not ev.cal.get('feed_rss'): return
 
-		ts_ev = tuple_hash(ts0, ts1) # id(ts0, ts1) for which last entry was fetched
-		if ts_ev == ts_ev_last:
-			if ev.ts_type.fixed: continue
-			if ev.ts_type.interval:
-				if conf.feed_interval_checks: # spread-out checks until next ts0
-					try: ts0 = ts1 = apply_ts_delta(ts0, ev.ts_interval, ts_max)
-					except TSOverflow: continue
-				elif ( -conf.feed_check_after_fixed_ts <= # last fetched item is close enough
-					ts0 - ts_entry <= conf.feed_check_before_fixed_ts ): continue
+	conf = conf_update(conf_base, ev.cal)
+	feed_url, feed_ua = ( ev.cal.feed_rss[-1],
+		conf.feed_user_agent.format(ver=conf.version, ver_fp=fp.__version__) )
+	fk_ts, fk_ts_ev, fk_ts_entry = (
+		state.key(k, feed_url) for k in ['feed.ts', 'feed.ts-ev', 'feed.ts-entry'] )
+	if ev.cal.get('_state_reset'):
+		for k in fk_ts, fk_ts_ev, fk_ts_entry: state.pop(k, None)
+	check_ts_last = conv_ts_utc(state.get(fk_ts, 0)) + conf.feed_check_min_interval
+	ts_ev_last, ts_entry = state.get(fk_ts_ev), conv_ts_utc(state.get(fk_ts_entry, 0))
+	ts0_last, ts0, ts1 = map(conv_ts_utc, [ev.ts0_last, ev.ts0, ev.ts1])
 
-		check_ts_list, check_n = [ts0, ts1], conf.feed_interval_checks + 1
-		if ev.ts_type.interval and conf.feed_interval_checks:
-			if ts0_last == ts1 and not state.get(fk_ts): # immediate first fetch
-				check_ts_list.append(ts_now - conf.feed_check_min_interval)
-			else:
-				check_ts_list.extend(
-					(ts0_last + dt.timedelta(seconds=delta)) for delta in
-						retries_within_timeout(check_n, (ts1 - ts0_last).total_seconds(), reverse=True) )
-		if conf.feed_check_before_fixed_ts:
+	ts_ev = tuple_hash(ts0, ts1) # id(ts0, ts1) for which last entry was fetched
+	if ts_ev == ts_ev_last:
+		if ev.ts_type.fixed: return
+		if ev.ts_type.interval:
+			if conf.feed_interval_checks: # spread-out checks until next ts0
+				try: ts0 = ts1 = apply_ts_delta(ts0, ev.ts_interval, ts_max)
+				except TSOverflow: return
+			elif ( -conf.feed_check_after_fixed_ts <= # last fetched item is close enough
+				ts0 - ts_entry <= conf.feed_check_before_fixed_ts ): return
+
+	check_ts_list, check_n = [ts0, ts1], conf.feed_interval_checks + 1
+	if ev.ts_type.interval and conf.feed_interval_checks:
+		if ts0_last == ts1 and not state.get(fk_ts): # immediate first fetch
+			check_ts_list.append(ts_now - conf.feed_check_min_interval)
+		else:
 			check_ts_list.extend(
-				(ts0 - dt.timedelta(seconds=delta)) for delta in
-				retries_within_timeout( check_n,
-					conf.feed_check_before_fixed_ts.total_seconds(), reverse=True ) )
-		if conf.feed_check_after_fixed_ts:
-			check_ts_list.extend(
-				(ts1 + dt.timedelta(seconds=delta)) for delta in
-				retries_within_timeout( check_n,
-					conf.feed_check_after_fixed_ts.total_seconds() ) )
-		for n, ts in enumerate(check_ts_list): check_ts_list[n] = ts.replace(microsecond=0)
+				(ts0_last + dt.timedelta(seconds=delta)) for delta in
+					retries_within_timeout(check_n, (ts1 - ts0_last).total_seconds(), reverse=True) )
+	if conf.feed_check_before_fixed_ts:
+		check_ts_list.extend(
+			(ts0 - dt.timedelta(seconds=delta)) for delta in
+			retries_within_timeout( check_n,
+				conf.feed_check_before_fixed_ts.total_seconds(), reverse=True ) )
+	if conf.feed_check_after_fixed_ts:
+		check_ts_list.extend(
+			(ts1 + dt.timedelta(seconds=delta)) for delta in
+			retries_within_timeout( check_n,
+				conf.feed_check_after_fixed_ts.total_seconds() ) )
+	for n, ts in enumerate(check_ts_list): check_ts_list[n] = ts.replace(microsecond=0)
 
-		check = False
-		for ts in sorted(check_ts_list):
-			if ts > ts_now: break
-			if check_ts_last >= ts: continue
-			check = ts # at least one scheduled check is in the past
-			break
-		if log.isEnabledFor(logging.DEBUG):
-			log.debug('Feed checks for: {} [{}]', ev.cal.title, feed_url)
-			ts_extra = {
-				'now': ts_now, 'last entry': ts_entry, 'last checked': check_ts_last,
-				'ev-start': ts0, 'ev-end': ts1, 'ev-start-past': ts0_last }
-			for ts in sorted(set(check_ts_list + list(ts_extra.values()))):
-				pointer = list()
-				for k, v in ts_extra.items():
-					if ts == v: pointer.append(k)
-				if ts == check: pointer.append('scheduled to run')
-				if pointer: pointer = (' <--- ' + ', '.join(pointer))
-				log.debug('  {}{}', repr_ts(ts), pointer or '')
-		if not check: continue
+	check = False
+	for ts in sorted(check_ts_list):
+		if ts > ts_now: break
+		if check_ts_last >= ts: return
+		check = ts # at least one scheduled check is in the past
+		break
+	if log.isEnabledFor(logging.DEBUG):
+		log.debug('Feed checks for: {} [{}]', ev.cal.title, feed_url)
+		ts_extra = {
+			'now': ts_now, 'last entry': ts_entry, 'last checked': check_ts_last,
+			'ev-start': ts0, 'ev-end': ts1, 'ev-start-past': ts0_last }
+		for ts in sorted(set(check_ts_list + list(ts_extra.values()))):
+			pointer = list()
+			for k, v in ts_extra.items():
+				if ts == v: pointer.append(k)
+			if ts == check: pointer.append('scheduled to run')
+			if pointer: pointer = (' <--- ' + ', '.join(pointer))
+			log.debug('  {}{}', repr_ts(ts), pointer or '')
+	if not check: return
 
-		fk_last_id, fk_etag = (
-			state.key(k, feed_url) for k in ['feed.last-id', 'feed.etag'] )
-		if ev.cal.get('_state_reset'):
-			for k in fk_last_id, fk_etag: state.pop(k, None)
-		feed_etag = state.get(fk_etag, '')
-		log.debug('Fetching feed: {} (etag={!r})', feed_url, feed_etag)
-		feed = feedparser.parse(feed_url, agent=feed_ua, etag=feed_etag)
-		status, bozo, bozo_err = (
-			feed.get(k) for k in ['status', 'bozo', 'bozo_exception'] )
-		if (not status and bozo) or (status or 1000) >= 400:
-			log.info('Failed to fetch feed (status={}): {} - {}', status, feed_url, bozo_err)
-			continue # check_ts_last not updated
-		if status != 304:
-			etag = feed.get('etag')
-			if etag and etag != feed_etag: state[fk_etag] = etag
-			entry = feed.entries[0]
-			entry_id_ver, entry_id = 'id.1', None
-			for k in 'id', 'title', 'link', 'published', 'modified', 'created':
-				entry_id = entry.get(k)
-				if entry_id: break
-			if entry_id:
-				entry_id = tuple_hash(entry_id_ver, entry_id)
-				if entry_id != state.get(fk_last_id):
-					state[fk_last_id] = entry_id
-					state[fk_ts_ev], state[fk_ts_entry] = ts_ev, ts_now.timestamp()
-				else: entry = None
-			else: log.warning('Failed to get id for feed [{}] entry: {}', feed_url, entry)
-			if entry and conf.dnote_enabled:
-				log.debug('  new entry (etag={!r}): {!r}', etag, entry_id)
-				notify_func(f'Feed update: {ev.cal.title}  ', f'New entry: {entry.title}')
-		state[fk_ts] = ts_now.timestamp()
+	fk_last_id, fk_etag = (
+		state.key(k, feed_url) for k in ['feed.last-id', 'feed.etag'] )
+	if ev.cal.get('_state_reset'):
+		for k in fk_last_id, fk_etag: state.pop(k, None)
+	feed_etag = state.get(fk_etag, '')
+	log.debug('Fetching feed: {} (etag={!r})', feed_url, feed_etag)
+	feed = fp.parse(feed_url, agent=feed_ua, etag=feed_etag)
+	status, bozo, bozo_err = (
+		feed.get(k) for k in ['status', 'bozo', 'bozo_exception'] )
+	if (not status and bozo) or (status or 1000) >= 400:
+		log.info('Failed to fetch feed (status={}): {} - {}', status, feed_url, bozo_err)
+		return # check_ts_last not updated
+	if status != 304:
+		etag = feed.get('etag')
+		if etag and etag != feed_etag: state[fk_etag] = etag
+		entry = feed.entries[0]
+		entry_id_ver, entry_id = 'id.1', None
+		for k in 'id', 'title', 'link', 'published', 'modified', 'created':
+			entry_id = entry.get(k)
+			if entry_id: break
+		if entry_id:
+			entry_id = tuple_hash(entry_id_ver, entry_id)
+			if entry_id != state.get(fk_last_id):
+				state[fk_last_id] = entry_id
+				state[fk_ts_ev], state[fk_ts_entry] = ts_ev, ts_now.timestamp()
+			else: entry = None
+		else: log.warning('Failed to get id for feed [{}] entry: {}', feed_url, entry)
+		if entry and conf.dnote_enabled:
+			log.debug('  new entry (etag={!r}): {!r}', etag, entry_id)
+			notify_func(f'Feed update: {ev.cal.title}  ', f'New entry: {entry.title}')
+	state[fk_ts] = ts_now.timestamp()
 
 
 
