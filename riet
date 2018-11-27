@@ -3,7 +3,7 @@
 import itertools as it, operator as op, functools as ft
 import os, sys, logging, re, time, math, subprocess
 import datetime as dt, collections as cs, pathlib as pl
-import contextlib, tempfile, stat, base64, hashlib, json
+import contextlib, tempfile, stat, base64, hashlib, json, unicodedata
 
 import pytz
 # As-needed deps: docutils, icalendar, feedparser
@@ -134,6 +134,7 @@ def tuple_hash(*data):
 
 bb = lambda v: v.encode() if isinstance(v, str) else v
 ss = lambda v: v.decode() if isinstance(v, bytes) else v
+cc = lambda v: unicodedata.normalize('NFKC', v).casefold()
 
 
 
@@ -404,6 +405,7 @@ def conv_ts_utc(ts):
 def conv_ts_local(ts):
 	'Convert datetime to local timezone for human output.'
 	if not ts: return
+	if isinstance(ts, (int, float)): ts = dt.datetime.fromtimestamp(ts)
 	return ts.astimezone(get_local_tz())
 
 def parse_delta_spec(ts_str):
@@ -907,6 +909,8 @@ def _check_feed(fp, ts_now, notify_func, ev, conf_base, state, ts_max):
 		state.key(k, feed_url) for k in ['feed.ts', 'feed.ts-ev', 'feed.ts-entry'] )
 	if ev.cal.get('_state_reset'):
 		for k in fk_ts, fk_ts_ev, fk_ts_entry: state.pop(k, None)
+
+	check_ts_list = list()
 	check_ts_last = conv_ts_utc(state.get(fk_ts, 0)) + conf.feed_check_min_interval
 	ts_ev_last, ts_entry = state.get(fk_ts_ev), conv_ts_utc(state.get(fk_ts_entry, 0))
 	ts0_last, ts0, ts1 = map(conv_ts_utc, [ev.ts0_last, ev.ts0, ev.ts1])
@@ -915,13 +919,16 @@ def _check_feed(fp, ts_now, notify_func, ev, conf_base, state, ts_max):
 	if ts_ev == ts_ev_last:
 		if ev.ts_type.fixed: return
 		if ev.ts_type.interval:
+			for ts in ts0, ts1:
+				if not ( -conf.feed_check_after_fixed_ts <= # if ts_entry is not close enough
+					ts0 - ts_entry <= conf.feed_check_before_fixed_ts ): check_ts_list.append(ts)
 			if conf.feed_interval_checks: # spread-out checks until next ts0
 				try: ts0 = ts1 = apply_ts_delta(ts0, ev.ts_interval, ts_max)
 				except TSOverflow: return
-			elif ( -conf.feed_check_after_fixed_ts <= # last fetched item is close enough
-				ts0 - ts_entry <= conf.feed_check_before_fixed_ts ): return
+			elif not check_ts_list: return
 
-	check_ts_list, check_n = [ts0, ts1], conf.feed_interval_checks + 1
+	check_n = conf.feed_interval_checks + 1
+	check_ts_list.extend([ts0, ts1])
 	if ev.ts_type.interval and conf.feed_interval_checks:
 		if ts0_last == ts1 and not state.get(fk_ts): # immediate first fetch
 			check_ts_list.append(ts_now - conf.feed_check_min_interval)
@@ -942,11 +949,6 @@ def _check_feed(fp, ts_now, notify_func, ev, conf_base, state, ts_max):
 	for n, ts in enumerate(check_ts_list): check_ts_list[n] = ts.replace(microsecond=0)
 
 	check = False
-	for ts in sorted(check_ts_list):
-		if ts > ts_now: break
-		if check_ts_last >= ts: return
-		check = ts # at least one scheduled check is in the past
-		break
 	if log.isEnabledFor(logging.DEBUG):
 		log.debug('Feed checks for: {} [{}]', ev.cal.title, feed_url)
 		ts_extra = {
@@ -959,6 +961,11 @@ def _check_feed(fp, ts_now, notify_func, ev, conf_base, state, ts_max):
 			if ts == check: pointer.append('scheduled to run')
 			if pointer: pointer = (' <--- ' + ', '.join(pointer))
 			log.debug('  {}{}', repr_ts(ts), pointer or '')
+	for ts in sorted(check_ts_list):
+		if ts > ts_now: break
+		if check_ts_last >= ts: continue
+		check = ts # at least one scheduled check is in the past
+		break
 	if not check: return
 
 	fk_last_id, fk_etag = (
@@ -1270,13 +1277,12 @@ def main(args=None):
 	conf = conf_update(conf_defaults, conf)
 
 	if opts.event:
-		ev_title = opts.event.lower()
-		cal_list = list(cal for cal in cal_list if ev_title in cal['title'].lower())
+		ev_title = cc(opts.event)
+		cal_list = list(cal for cal in cal_list if ev_title in cc(cal['title']))
 	if opts.state_reset:
-		ev_title, ev_found = opts.state_reset.lower(), False
+		ev_title, ev_found = cc(opts.state_reset), False
 		for cal in cal_list:
-			if ev_title in cal['title'].lower():
-				ev_found = cal['_state_reset'] = True
+			if ev_title in cc(cal['title']): ev_found = cal['_state_reset'] = True
 		if not ev_found:
 			print( 'ERROR: Failed to find event title matching'
 				f' --state-reset option: {opts.state_reset}', file=sys.stderr )
