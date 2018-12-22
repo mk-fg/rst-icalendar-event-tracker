@@ -346,7 +346,8 @@ tza_map = dict(line.split('=', 1) for line in '''
 	KDT=Asia/Seoul NZDT=Pacific/Auckland EWT=America/New_York HKST=Asia/Hong_Kong
 	SAST=Africa/Johannesburg ACDT=Australia/Adelaide ACST=Australia/Adelaide
 	NZST=Pacific/Auckland EDT=America/New_York IDDT=Asia/Jerusalem
-	DMT=Europe/Dublin AHST=America/Anchorage'''.split())
+	DMT=Europe/Dublin AHST=America/Anchorage
+	PT=America/Los_Angeles ET=America/New_York MT=America/Phoenix CT=America/Chicago'''.split())
 
 IntervalFilter = cs.namedtuple('interval_filter', 'mo_days weekdays time tz')
 IntervalDelta = cs.namedtuple('interval_delta', 'y mo w d h m s')
@@ -878,8 +879,9 @@ def cal_list_to_events(cal_list, ts_min, ts_max, state):
 			log.debug('----- title: {}', cal.title)
 			log.debug('  raw: ts={} start={} end={}', cal.raw_ts, cal.raw_ts_start, cal.raw_ts_end)
 			if ts_keys: log.debug('  ts-keys: {}', ' '.join(sorted(ts_keys)))
-			for ts0, ts1, *ev_info in ts_list:
+			for ts0, ts1, ts_type, ts0_last, *ev_info in ts_list:
 				log.debug('  result [{}]:', repr_ts_diff(ts1 - ts0))
+				if ts0_last: log.debug('    last: {}', repr_ts(ts0_last))
 				log.debug('    from: {}', repr_ts(ts0))
 				log.debug('    to:   {}', repr_ts(ts1))
 			urls = cal.get('url', list()) + cal.get('feed_rss', list())
