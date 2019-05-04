@@ -323,6 +323,20 @@ def get_dbus_notify_func(**defaults):
 class TSParseError(Exception): pass
 class TSOverflow(Exception): pass
 
+class FixedOffsetTZ(dt.tzinfo):
+	_offset = _name = None
+	@classmethod
+	def from_offset(cls, name=None, delta=None, hh=None, mm=None):
+		self = cls()
+		if delta is None: delta = dt.timedelta(hours=hh or 0, minutes=mm or 0)
+		self._name, self._offset = name, delta
+		return self
+	def utcoffset(self, dt): return self._offset
+	def tzname(self, dt): return self._name
+	def dst(self, dt, ZERO=dt.timedelta(0)): return ZERO
+	def localize(self, dt, is_dst=False): return dt.replace(tzinfo=self)
+	def __repr__(self): return '<FixedOffset {!r}>'.format(self._name)
+
 # Common timezone abbrevs which pytz refuses to handle
 # Use make-tza-map.py script to produce these mappings from timezonedb.com/download csv
 tza_map = dict(line.split('=', 1) for line in '''
@@ -448,6 +462,16 @@ def parse_ts_or_interval(ts_str, multiple=False):
 	if multiple and not isinstance(ts, list): ts = [ts]
 	return ts
 
+def parse_tz(tz_str):
+	m = re.search(r'^([-+])(\d{1,2}):?(\d\d)?$', tz_str)
+	if m:
+		s, hh, mm = m.groups()
+		s = int(f'{s}1')
+		tz = FixedOffsetTZ.from_offset(
+			f'{s}{int(hh):02d}{int(mm or 0):02d}', hh=s*int(hh), mm=s*int(mm or 0) )
+	else: tz = pytz.timezone(tza_map.get(tz_str, tz_str))
+	return tz
+
 def parse_ts(ts_str, in_future=True, multiple=False):
 	assert isinstance(ts_str, str), [type(ts_str), repr(ts_str)]
 	ts = tz = None
@@ -455,7 +479,7 @@ def parse_ts(ts_str, in_future=True, multiple=False):
 	if m:
 		ts_str, tz = m.groups()
 		tz = tz.strip()
-		tz = pytz.timezone(tza_map.get(tz, tz))
+		tz = parse_tz(tz)
 	if not ts:
 		match = re.search( # common BE format
 			r'^(?P<date>(?:\d{2}|(?P<Y>\d{4}))-\d{2}-\d{2})'
