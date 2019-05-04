@@ -9,6 +9,8 @@ import pytz
 # As-needed deps: docutils, icalendar, feedparser
 
 
+err_fmt = lambda err: '[{}] {}'.format(err.__class__.__name__, err)
+
 class LogMessage:
 	def __init__(self, fmt, a, k): self.fmt, self.a, self.k = fmt, a, k
 	def __str__(self): return self.fmt.format(*self.a, **self.k) if self.a or self.k else self.fmt
@@ -1240,7 +1242,11 @@ def main(args=None):
 		if '=' in value: key, value = value.split('=', 1)
 		parser = dict( ts=parse_ts_or_interval, ts_start=parse_ts,
 			ts_end=parse_ts, duration=parse_duration )[key.replace('-', '_').lower()]
-		res = parser(value)
+		try: res = parser(value)
+		except TSParseError as err:
+			print(f'ERROR: failed to parse {value!r} (key={key}): {err_fmt(err)}', file=sys.stderr)
+			print(f'(hint: timezone should usually be in square brackets)', file=sys.stderr)
+			return 1
 		res_str = ( repr_ts(res) if isinstance(res, dt.datetime)
 			else str(res).replace('datetime.', '').replace('timedelta(', 'td(') )
 		if len(res_str) > 50: res_str = '\n' + text_fill(res_str, len(res_str) / 2 + 5, ' '*2, ' '*4)
