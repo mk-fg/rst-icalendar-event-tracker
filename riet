@@ -27,6 +27,7 @@ class LogStyleAdapter(logging.LoggerAdapter):
 get_logger = lambda name: LogStyleAdapter(logging.getLogger(name))
 log = get_logger('main')
 
+
 class adict(dict):
 	def __init__(self, *args, **kwargs):
 		super().__init__(*args, **kwargs)
@@ -339,7 +340,7 @@ class FixedOffsetTZ(dt.tzinfo):
 
 # Common timezone abbrevs which pytz refuses to handle
 # Use make-tza-map.py script to produce these mappings from timezonedb.com/download csv
-tza_map = dict(line.split('=', 1) for line in '''
+tza_map = dict((cc(k), v) for k, v in (line.split('=', 1) for line in '''
 	EMT=Pacific/Easter PPT=America/Los_Angeles YST=America/Anchorage JST=Asia/Tokyo
 	RMT=Europe/Rome PKT=Asia/Karachi AMT=Europe/Amsterdam EST=America/New_York
 	QMT=America/Guayaquil PDDT=America/Inuvik WEST=Europe/Paris JDT=Asia/Tokyo
@@ -362,8 +363,8 @@ tza_map = dict(line.split('=', 1) for line in '''
 	KDT=Asia/Seoul NZDT=Pacific/Auckland EWT=America/New_York HKST=Asia/Hong_Kong
 	SAST=Africa/Johannesburg ACDT=Australia/Adelaide ACST=Australia/Adelaide
 	NZST=Pacific/Auckland EDT=America/New_York IDDT=Asia/Jerusalem
-	DMT=Europe/Dublin AHST=America/Anchorage
-	PT=America/Los_Angeles ET=America/New_York MT=America/Phoenix CT=America/Chicago'''.split())
+	DMT=Europe/Dublin AHST=America/Anchorage PT=America/Los_Angeles
+	ET=America/New_York MT=America/Phoenix CT=America/Chicago'''.split()))
 
 IntervalFilter = cs.namedtuple('interval_filter', 'mo_days weekdays time tz')
 IntervalDelta = cs.namedtuple('interval_delta', 'y mo w d h m s')
@@ -469,7 +470,7 @@ def parse_tz(tz_str):
 		s = int(f'{s}1')
 		tz = FixedOffsetTZ.from_offset(
 			f'{s}{int(hh):02d}{int(mm or 0):02d}', hh=s*int(hh), mm=s*int(mm or 0) )
-	else: tz = pytz.timezone(tza_map.get(tz_str, tz_str))
+	else: tz = pytz.timezone(tza_map.get(cc(tz_str), tz_str))
 	return tz
 
 def parse_ts(ts_str, in_future=True, multiple=False):
