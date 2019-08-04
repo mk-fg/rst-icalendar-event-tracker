@@ -1009,11 +1009,14 @@ def _check_feed(fp, ts_now, notify_func, ev, conf_base, state, ts_max):
 	if (not status and bozo) or (status or 1000) >= 400:
 		log.info('Failed to fetch feed (status={}): {} - {}', status, feed_url, bozo_err)
 		return # check_ts_last not updated
-	if status != 304:
+
+	err = False # fk_ts updates unless there's some bug here
+	try:
+		if status == 304: return
 		etag = feed.get('etag')
 		if etag and etag != feed_etag: state[fk_etag] = etag
-		entry = feed.entries[0]
-		entry_id_ver, entry_id = 'id.1', None
+		if not feed.entries: return
+		entry_id_ver, entry_id, entry = 'id.1', None, feed.entries[0]
 		for k in 'id', 'title', 'link', 'published', 'modified', 'created':
 			entry_id = entry.get(k)
 			if entry_id: break
@@ -1027,7 +1030,11 @@ def _check_feed(fp, ts_now, notify_func, ev, conf_base, state, ts_max):
 		if entry and conf.dnote_enabled:
 			log.debug('  new entry (etag={!r}): {!r}', etag, entry_id)
 			notify_func(f'Feed update: {ev.cal.title}  ', f'New entry: {entry.title}')
-	state[fk_ts] = ts_now.timestamp()
+	except:
+		err = True
+		raise
+	finally:
+		if not err: state[fk_ts] = ts_now.timestamp()
 
 
 
