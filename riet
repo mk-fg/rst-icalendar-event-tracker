@@ -919,8 +919,9 @@ def cal_list_to_events(cal_list, ts_min, ts_max, state):
 
 	return ev_list
 
-def check_feeds(ev_list, conf, state, ts_max):
-	import feedparser
+def check_feeds(ev_list, conf, state, ts_max, socket_timeout=...):
+	import feedparser, socket
+	if socket_timeout is not ...: socket.setdefaulttimeout(socket_timeout)
 	ts_now = dt.datetime.utcnow().replace(tzinfo=pytz.utc)
 	notify_func = lambda title, body, func=get_dbus_notify_func(): func(
 		title, body, icon=conf.dnote_icon, timeout=conf.dnote_timeout,
@@ -1227,6 +1228,9 @@ def main(args=None):
 				text_fill(text_params_default_str, len(text_params_default_str) // 5 - 5, '\t'*4) ))
 	group.add_argument('-f', '--feeds', action='store_true',
 		help='Check any embedded feed URLs and notify about any updates there.')
+	group.add_argument('--feeds-socket-timeout',
+		type=float, metavar='seconds', default=20.0,
+		help='Timeout for socket operations when fetching feeds, in seconds. Default: %(default)ss')
 
 	group = parser.add_argument_group('Event filtering')
 	group.add_argument('-e', '--event', metavar='title-part',
@@ -1329,7 +1333,9 @@ def main(args=None):
 			return 1
 	ev_list = cal_list_to_events(cal_list, ts_min, ts_max, state)
 
-	if opts.feeds: check_feeds(ev_list, conf, state, ts_max)
+	if opts.feeds:
+		check_feeds( ev_list, conf, state,
+			ts_max, socket_timeout=opts.feeds_socket_timeout )
 
 	if opts.ical:
 		ev_dtstamp = conv_ts_local(ts_min)
