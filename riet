@@ -943,22 +943,29 @@ def _check_feed(fp, ts_now, notify_func, ev, conf_base, state, ts_max):
 	check_ts_list = list()
 	check_ts_last = conv_ts_utc(state.get(fk_ts, 0)) + conf.feed_check_min_interval
 	ts_ev_last, ts_entry = state.get(fk_ts_ev), conv_ts_utc(state.get(fk_ts_entry, 0))
+	# Initial ts0/ts1 have nothing to do with feeds/entries,
+	#  and are strict event start/end times, but they can be adjusted below
 	ts0_last, ts0, ts1 = map(conv_ts_utc, [ev.ts0_last, ev.ts0, ev.ts1])
+
+	# Discards timestamps that are too close to ts_entry wrt before/after checks
+	ts_entry_filter = ( lambda ts,
+			tse0=ts_entry - conf.feed_check_after_fixed_ts,
+			tse1=ts_entry + conf.feed_check_before_fixed_ts:
+		ts if not (tse0 <= ts <= tse1) else None )
 
 	ts_ev = tuple_hash(ts0, ts1) # id(ts0, ts1) for which last entry was fetched
 	if ts_ev == ts_ev_last:
 		if ev.ts_type.fixed: return
-		if ev.ts_type.interval:
-			for ts in ts0, ts1:
-				if not ( -conf.feed_check_after_fixed_ts <= # if ts_entry is not close enough
-					ts0 - ts_entry <= conf.feed_check_before_fixed_ts ): check_ts_list.append(ts)
-			if conf.feed_interval_checks: # spread-out checks until next ts0
-				try: ts0 = ts1 = apply_ts_delta(ts0, ev.ts_interval, ts_max)
-				except TSOverflow: return
-			elif not check_ts_list: return
+		if ev.ts_type.interval and conf.feed_interval_checks and (
+				not ts_entry_filter(ts0) or (ts_entry > ts0_last and ts_entry_filter(ts0_last)) ):
+			# Spread-out checks until next ts0 if there was event within this interval already
+			check_ts_list.extend(filter(None, map(ts_entry_filter, [ts0, ts1])))
+			try: ts0 = ts1 = apply_ts_delta(ts0, ev.ts_interval, ts_max)
+			except TSOverflow: return
 
 	check_n = conf.feed_interval_checks + 1
 	check_ts_list.extend([ts0, ts1])
+
 	if ev.ts_type.interval and conf.feed_interval_checks:
 		if ts0_last == ts1 and not state.get(fk_ts): # immediate first fetch
 			check_ts_list.append(ts_now - conf.feed_check_min_interval)
@@ -966,6 +973,7 @@ def _check_feed(fp, ts_now, notify_func, ev, conf_base, state, ts_max):
 			check_ts_list.extend(
 				(ts0_last + dt.timedelta(seconds=delta)) for delta in
 					retries_within_timeout(check_n, (ts1 - ts0_last).total_seconds(), reverse=True) )
+
 	if conf.feed_check_before_fixed_ts:
 		check_ts_list.extend(
 			(ts0 - dt.timedelta(seconds=delta)) for delta in
@@ -976,6 +984,7 @@ def _check_feed(fp, ts_now, notify_func, ev, conf_base, state, ts_max):
 			(ts1 + dt.timedelta(seconds=delta)) for delta in
 			retries_within_timeout( check_n,
 				conf.feed_check_after_fixed_ts.total_seconds() ) )
+
 	for n, ts in enumerate(check_ts_list): check_ts_list[n] = ts.replace(microsecond=0)
 
 	check = False
