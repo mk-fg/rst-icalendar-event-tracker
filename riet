@@ -809,9 +809,12 @@ def parse_data_from_rst(rst_str):
 EventInfo = cs.namedtuple('EventInfo', 'ts0 ts1 cal ts_type ts0_last ts_interval')
 EventInfoTSType = enum_func('fixed interval', mutex_flags=True)
 
+# Custom accept_header is for github specifically - returns html instead of feed if */* is in there
 conf_defaults = dict(
 	version='1.0',
 	feed_user_agent='riet/{ver} (rst-icalendar-event-tracker) feedparser/{ver_fp}',
+	feed_accept_header='application/atom+xml,application/rdf+xml,'
+		'application/rss+xml,application/x-netcdf,application/xml;q=0.9,text/xml;q=0.2',
 	feed_interval_checks=5,
 	feed_check_before_fixed_ts=delta_1d,
 	feed_check_after_fixed_ts=delta_1d,
@@ -1013,7 +1016,8 @@ def _check_feed(fp, ts_now, notify_func, ev, conf_base, state, ts_max):
 		for k in fk_last_id, fk_etag: state.pop(k, None)
 	feed_etag = state.get(fk_etag, '')
 	log.debug('Fetching feed: {} (etag={!r})', feed_url, feed_etag)
-	feed = fp.parse(feed_url, agent=feed_ua, etag=feed_etag)
+	feed = fp.parse( feed_url, agent=feed_ua,
+		etag=feed_etag, request_headers=dict(Accept=conf.feed_accept_header) )
 	status, bozo, bozo_err = (
 		feed.get(k) for k in ['status', 'bozo', 'bozo_exception'] )
 	if (not status and bozo) or (status or 1000) >= 400:
