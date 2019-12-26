@@ -481,8 +481,8 @@ def parse_ts(ts_str, in_future=True, multiple=False):
 		ts_str, tz = m.groups()
 		tz = tz.strip()
 		tz = parse_tz(tz)
-	if not ts:
-		match = re.search( # common BE format
+	if not ts: # common BE date format, with optional time
+		match = re.search(
 			r'^(?P<date>(?:\d{2}|(?P<Y>\d{4}))-\d{2}-\d{2})'
 			r'(?:[ T](?P<time>\d{2}(?::\d{2}(?::\d{2})?)?)?)?$', ts_str )
 		if match:
@@ -495,6 +495,20 @@ def parse_ts(ts_str, in_future=True, multiple=False):
 				tpl += ' ' + ':'.join(tpl_time[:len(ts_str_time)])
 			try: ts = dt.datetime.strptime(ts_str, tpl)
 			except ValueError: pass
+	if not ts: # just time without AM/PM - treat as 24h format
+		match = re.search(r'^\d{1,2}:\d{2}(?::\d{2}(?P<us>\.\d+)?)?$', ts_str)
+		if match:
+			us, tpl = 0, ':'.join(['%H', '%M', '%S'][:len(ts_str.split(':'))])
+			if match.group('us'):
+				ts_str, us = ts_str.rsplit('.', 1)
+				us = us[:6] + '0'*max(0, 6 - len(us))
+			try: ts_time = dt.datetime.strptime(ts_str, tpl)
+			except ValueError: pass
+			else:
+				ts0 = dt.datetime.now()
+				ts = dt.datetime.now().replace( hour=ts_time.hour,
+					minute=ts_time.minute, second=ts_time.second, microsecond=int(us) )
+				if ts0 > ts: ts += dt.timedelta(days=1)
 	if not ts:
 		# coreutils' "date" parses virtually everything, but is more expensive to use
 		ts_ext, ts_list = [ts_str], list()
