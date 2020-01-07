@@ -648,9 +648,12 @@ def repr_ts_diff( ts, ts0=None,
 		ext=None, units_max=2, units_res=None,
 		_units=dict( h=3600, m=60, s=1,
 			y=365.25*86400, mo=30.5*86400, w=7*86400, d=1*86400 ) ):
-	delta = abs(
-		(ts - (ts0 or dt.datetime.now()))
-		if not isinstance(ts, dt.timedelta) else ts )
+	if isinstance(ts, dt.timedelta): delta = abs(ts)
+	else:
+		if not ts0:
+			ts0 = dt.datetime.now()
+			if ts.tzinfo: ts0 = conv_ts_utc(ts0)
+		delta = abs(ts - ts0)
 	res, s, n_last = list(), delta.total_seconds(), units_max - 1
 	for unit, unit_s in sorted(_units.items(), key=op.itemgetter(1), reverse=True):
 		val = math.floor(s / unit_s)
@@ -1317,6 +1320,13 @@ def main(args=None):
 		print(f'Parsed value (field={key}): {res_str}')
 		if isinstance(res, dt.timedelta): print(f'Total seconds: {res.total_seconds()}')
 		if isinstance(res, dt.datetime): print(f'POSIX timestamp: {res.timestamp()}')
+		if not isinstance(res, dt.timedelta):
+			ts_now = dt.datetime.now()
+			if res.tzinfo: ts_now = conv_ts_utc(ts_now)
+			offset_dir = 'now'
+			if res > ts_now: offset_dir = 'future'
+			elif res < ts_now: offset_dir = 'past'
+			print(f'From now: {repr_ts_diff(res, ts_now)} ({offset_dir})')
 		return
 
 	rst_stdin, rst_path = not opts.rst_file or opts.rst_file == '-', pl.Path(opts.rst_file)
