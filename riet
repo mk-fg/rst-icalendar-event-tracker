@@ -925,14 +925,16 @@ def cal_list_to_events(cal_list, ts_min, ts_max, state):
 			log.debug('')
 			log.debug('----- title: {}', cal.title)
 			log.debug('  raw: ts={} start={} end={}', cal.raw_ts, cal.raw_ts_start, cal.raw_ts_end)
-			if ts_keys: log.debug('  ts-keys: {}', ' '.join(sorted(ts_keys)))
+			if ts_keys:
+				log.debug( '  ts-keys: {}',
+					', '.join(f'{k} [{conv_ts_local(state.get(k))}]' for k in sorted(ts_keys)) )
 			for ts0, ts1, ts_type, ts0_last, *ev_info in ts_list:
 				log.debug('  result [{}]:', repr_ts_diff(ts1 - ts0))
 				if ts0_last: log.debug('    last: {}', repr_ts(ts0_last))
 				log.debug('    from: {}', repr_ts(ts0))
 				log.debug('    to:   {}', repr_ts(ts1))
-			urls = cal.get('url', list()) + cal.get('feed_rss', list())
-			for url in urls: log.debug('  url: {}', url)
+			for url in cal.get('url', list()): log.debug('  url: {}', url)
+			for url in cal.get('feed_rss', list()): log.debug('  url: {} [feed]', url)
 
 		for ts0, ts1, *ev_info in ts_list:
 			ev_list.append(EventInfo(conv_ts_local(ts0), conv_ts_local(ts1), cal, *ev_info))
