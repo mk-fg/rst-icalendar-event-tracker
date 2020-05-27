@@ -44,6 +44,32 @@ Feed options (e.g. ``:feed-rss:``):
 
   Default: 1d
 
+
+Approaching-time notification options:
+
+  These are notifications issued when ``:note-ts:`` tag is used for event,
+  e.g. ``:note-ts: dnote`` to issue desktop notification (if these are enabled)
+  at exact time of the event.
+
+  Same as with other things, these only get issued for events that are filtered
+  for display, i.e. not stuff too far in the past or future.
+
+  :note-ts-window: 1h
+
+  | When event is in the future, will issue notification up to specified window before event.
+  | This should probably be set to be slightly more than interval between script runs, if any.
+
+  Default: 1h
+
+  :note-ts-window-past: 3d
+
+  Same as ``:ts-note-window:`` above, but looking into past, and for events
+  where intiial time was missed. I.e. with 3d - alert for events missed in the
+  last 3 days, if script was never run at the time.
+
+  Default: 3d
+
+
 Desktop notification options:
 
   :dnote-enabled: true
@@ -280,3 +306,27 @@ Releases
     With a one-off (not "every X") timestamp, ``:feed-rss:`` is not used,
     unless ``:feed-check-for:`` interval (same as ``:duration:``) is specified
     for it or in the common config section, during/after which checks will be made.
+
+- Some Important Event
+
+  :ts: 2018-11-30 12:00
+  :note-ts: dnote
+  :dnote-icon: alarm
+
+  Note: desktop notification will be issued at the time, with specified
+  before/after time-window parameters (see above) and notification parameters.
+
+- Important Recurring Event
+
+  :ts: every 19th-21st
+  :ts: every 23rd
+  :note-ts: dnote
+  :note-ts-interval: 7d
+
+  Note:
+
+    ``:note-ts-interval:`` will make sure that only one notification is issued
+    for the whole timespan, even if it's discontinuous like that (4 separate days).
+
+    Default interval is 0 - i.e. separate notification will be issued for evey
+    ``:ts:`` or timespan.

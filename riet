@@ -9,7 +9,7 @@ import pytz
 # As-needed deps: docutils, icalendar, feedparser
 
 
-err_fmt = lambda err: '[{}] {}'.format(err.__class__.__name__, err)
+err_fmt = lambda err: f'[{err.__class__.__name__}] {err}'
 
 class LogMessage:
 	def __init__(self, fmt, a, k): self.fmt, self.a, self.k = fmt, a, k
@@ -336,7 +336,7 @@ class FixedOffsetTZ(dt.tzinfo):
 	def tzname(self, dt): return self._name
 	def dst(self, dt, ZERO=dt.timedelta(0)): return ZERO
 	def localize(self, dt, is_dst=False): return dt.replace(tzinfo=self)
-	def __repr__(self): return '<FixedOffset {!r}>'.format(self._name)
+	def __repr__(self): return f'<FixedOffset {self._name!r}>'
 
 # Common timezone abbrevs which pytz refuses to handle
 # Use make-tza-map.py script to produce these mappings from timezonedb.com/download csv
@@ -487,7 +487,7 @@ def parse_ts(ts_str, in_future=True, multiple=False):
 			r'(?:[ T](?P<time>\d{2}(?::\d{2}(?::\d{2})?)?)?)?$', ts_str )
 		if match:
 			tpl = 'y' if not match.group('Y') else 'Y'
-			tpl, ts_str = '%{}-%m-%d'.format(tpl), match.group('date')
+			tpl, ts_str = f'%{tpl}-%m-%d', match.group('date')
 			if match.group('time'):
 				tpl_time = ['%H', '%M', '%S']
 				ts_str_time = match.group('time').split(':')
@@ -662,7 +662,7 @@ def repr_ts_diff( ts, ts0=None,
 			continue
 		if len(res) == n_last or units_res == unit:
 			val, n_last = round(s / unit_s), True
-		res.append('{:.0f}{}'.format(val, unit))
+		res.append(f'{val:.0f}{unit}')
 		if n_last is True: break
 		s -= val * unit_s
 	if not res: return '-'
@@ -821,14 +821,16 @@ def parse_data_from_rst(rst_str):
 
 
 
-### Calendar data processing, feeds, etc
+### Calendar data processing
 
 EventInfo = cs.namedtuple('EventInfo', 'ts0 ts1 cal ts_type ts0_last ts_interval')
 EventInfoTSType = enum_func('fixed interval', mutex_flags=True)
 
-# Custom accept_header is for github specifically - returns html instead of feed if */* is in there
 conf_defaults = dict(
 	version='1.0',
+
+	# Custom accept_header is for github specifically
+	# (it returns html instead of feed if */* is in there)
 	feed_user_agent='riet/{ver} (rst-icalendar-event-tracker) feedparser/{ver_fp}',
 	feed_accept_header='application/atom+xml,application/rdf+xml,'
 		'application/rss+xml,application/x-netcdf,application/xml;q=0.9,text/xml;q=0.2',
@@ -836,6 +838,10 @@ conf_defaults = dict(
 	feed_check_before_fixed_ts=delta_1d,
 	feed_check_after_fixed_ts=delta_1d,
 	feed_check_min_interval=dt.timedelta(seconds=60),
+
+	note_ts_window=dt.timedelta(hours=1),
+	note_ts_window_past=dt.timedelta(days=3),
+
 	dnote_enabled=True, dnote_icon='', dnote_timeout=-1, dnote_app='riet', dnote_urgency=1 )
 
 def conf_parse_bool(v, _states={
@@ -858,8 +864,7 @@ def conf_update(conf, update):
 		elif isinstance(v_def, dt.timedelta): v = parse_duration(v)
 		else: continue
 		conf[k] = v
-	if conf.feed_interval_checks <= 0:
-		conf.feed_interval_checks = 0
+	if conf.get('feed_interval_checks', 1) <= 0: conf.feed_interval_checks = 0
 	return conf
 
 def cal_list_to_events(cal_list, ts_min, ts_max, state):
@@ -941,17 +946,75 @@ def cal_list_to_events(cal_list, ts_min, ts_max, state):
 
 	return ev_list
 
+
+### Approaching-time notification events
+
+def issue_notifications(ev_list, conf, state):
+	ts_now = dt.datetime.utcnow().replace(tzinfo=pytz.utc)
+	ts_min, ts_max = ts_now - conf.note_ts_window_past, ts_now + conf.note_ts_window
+	err_warn_dedup = set()
+	method_funcs = dict(dnote=note_ts_dnote)
+	for ev in ev_list:
+		methods, methods_all = set(' '.join(ev.cal.get('note_ts') or '').split()), method_funcs.keys()
+		methods, methods_err = methods & methods_all, methods - methods_all
+		if methods_err and ev.cal.title not in err_warn_dedup:
+			err_warn_dedup.add(ev.cal.title)
+			log.warning( 'Unknown ts-note methods for entry:'
+				' {!r} [{}]', ev.cal.title, ' '.join(sorted(methods_err)) )
+		if not methods: continue
+		if not (ts_min <= ev.ts0 <= ts_max or ts_min <= ev.ts1 <= ts_max): continue
+
+		note_ev_k = state.key('note.ts.ev', ev.cal.title)
+		ts_ev_last_done = (ts_ev_last_done := state.get(note_ev_k)) and conv_ts_utc(ts_ev_last_done)
+		if ts_ev_last_done and ev.ts0 <= ts_ev_last_done: continue # already notified about this one
+
+		ts_interval = parse_duration(ev.cal.get('note_ts_interval') or '0s')
+		log.debug( 'Processing notifications for: {} [{}{}]', ev.cal.title, ' '.join(methods),
+			f', interval={repr_ts_diff(ts_interval)}' if ts_interval.total_seconds() >= 1 else '' )
+		ts_interval = ts_now - ts_interval
+		for k in methods:
+			note_ts_k = state.key('note.ts.method', ev.cal.title, k)
+			ts_last = (ts_last := state.get(note_ts_k)) and conv_ts_utc(ts_last)
+			if ts_last and ts_last > ts_interval:
+				log.debug( 'Skipping notification method due to min-interval:'
+					' {} [{}], ts_last=[{}] ts_max=[{}]', ev.cal.title, k, ts_last, ts_interval )
+				continue
+			method_funcs[k](ev, conf, ts_now)
+			state[note_ts_k] = ts_now.timestamp()
+		state[note_ev_k] = ev.ts0.timestamp()
+
+def note_ts_dnote(ev, conf, ts_now):
+	if not conf.dnote_enabled: return
+	def _note_ts_repr(ts):
+		ts_str = ts.strftime('%Y-%m-%d')
+		ts_str_ext = ts.strftime('%H:%M:%S')
+		if ts_str_ext not in ['00:00:00', '23:59:59']: ts_str = f'{ts_str} {ts_str_ext}'
+		return '{} (<b>{}</b>)'.format( ts_str,
+			repr_ts_diff(ts, ts_now, ext=None if (ts - ts_now).total_seconds() >= 0 else 'ago') )
+	log.debug('  notification: dnote [{}]', ev.ts0)
+	ts_span, label_len = ev.ts0 != ev.ts1, 14
+	body = [('Start' if ts_span else 'Event time', _note_ts_repr(ev.ts0))]
+	if ts_span: body.append(('End', _note_ts_repr(ev.ts1)))
+	body.append(('Current time', ts_now.strftime('%Y-%m-%d %H:%M')))
+	body = '\n'.join(
+		(f'<tt>{{:<{label_len}s}}</tt>{{}}'.format(t + ':', v) if t else v) for t, v in body )
+	dnote_conf, dnote_kws = dict(), dict()
+	for k, v in ev.cal.items():
+		if not k.startswith('dnote_'): continue
+		dnote_conf[k], dnote_kws[k] = conf[k], v
+	dnote_kws = dict((k[6:], v) for k, v in conf_update(dnote_conf, dnote_kws).items())
+	conf.dnote_func(f'Event: {ev.cal.title}', body, **dnote_kws)
+
+
+### Feeds
+
 def check_feeds(ev_list, conf, state, ts_max, socket_timeout=...):
 	import feedparser, socket
 	if socket_timeout is not ...: socket.setdefaulttimeout(socket_timeout)
 	ts_now = dt.datetime.utcnow().replace(tzinfo=pytz.utc)
-	notify_func = lambda title, body, func=get_dbus_notify_func(): func(
-		title, body, icon=conf.dnote_icon, timeout=conf.dnote_timeout,
-		app=conf.dnote_app, hints=dict(urgency=conf.dnote_urgency) )
-	for ev in ev_list:
-		_check_feed(feedparser, ts_now, notify_func, ev, conf, state, ts_max)
+	for ev in ev_list: _check_feed(feedparser, ts_now, ev, conf, state, ts_max)
 
-def _check_feed(fp, ts_now, notify_func, ev, conf_base, state, ts_max):
+def _check_feed(fp, ts_now, ev, conf_base, state, ts_max):
 	if not ev.cal.get('feed_rss'): return
 
 	conf = conf_update(conf_base, ev.cal)
@@ -1062,7 +1125,7 @@ def _check_feed(fp, ts_now, notify_func, ev, conf_base, state, ts_max):
 		else: log.warning('Failed to get id for feed [{}] entry: {}', feed_url, entry)
 		if entry and conf.dnote_enabled:
 			log.debug('  new entry (etag={!r}): {!r}', etag, entry_id)
-			notify_func(f'Feed update: {ev.cal.title}  ', f'New entry: {entry.title}')
+			conf.dnote_func(f'Feed update: {ev.cal.title}  ', f'New entry: {entry.title}')
 	except:
 		err = True
 		raise
@@ -1359,6 +1422,11 @@ def main(args=None):
 	cal_list, conf = parse_data_from_rst(rst_text.replace('\t', '  '))
 	conf = conf_update(conf_defaults, conf)
 
+	if conf.dnote_enabled:
+		conf.dnote_func = get_dbus_notify_func(
+			icon=conf.dnote_icon, timeout=conf.dnote_timeout,
+			app=conf.dnote_app, hints=dict(urgency=conf.dnote_urgency) )
+
 	if opts.event:
 		ev_title = cc(opts.event)
 		cal_list = list(cal for cal in cal_list if ev_title in cc(cal['title']))
@@ -1371,6 +1439,8 @@ def main(args=None):
 				f' --state-reset option: {opts.state_reset}', file=sys.stderr )
 			return 1
 	ev_list = cal_list_to_events(cal_list, ts_min, ts_max, state)
+
+	issue_notifications(ev_list, conf, state)
 
 	if opts.feeds:
 		check_feeds( ev_list, conf, state,
