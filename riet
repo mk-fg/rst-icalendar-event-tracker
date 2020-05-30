@@ -995,7 +995,7 @@ def note_ts_dnote(ev, conf, ts_now):
 	ts_span, label_len = ev.ts0 != ev.ts1, 14
 	body = [('Start' if ts_span else 'Event time', _note_ts_repr(ev.ts0))]
 	if ts_span: body.append(('End', _note_ts_repr(ev.ts1)))
-	body.append(('Current time', ts_now.strftime('%Y-%m-%d %H:%M')))
+	body.append(('Current time', conv_ts_local(ts_now).strftime('%Y-%m-%d %H:%M')))
 	body = '\n'.join(
 		(f'<tt>{{:<{label_len}s}}</tt>{{}}'.format(t + ':', v) if t else v) for t, v in body )
 	dnote_conf, dnote_kws = dict(), dict()
