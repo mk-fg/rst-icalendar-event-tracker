@@ -681,8 +681,15 @@ def apply_ts_delta( ts, delta,
 					n = getattr(ts, k) + n
 					if k == 'month' and n > 12:
 						while n > 12: ts, n = ts.replace(year=ts.year+1), n - 12
-						ts = ts.replace(month=n)
-					else: ts = ts.replace(**{k: n})
+					if k != 'month': ts = ts.replace(**{k: n})
+					else: # handle day overflows on month replacement
+						while True:
+							try:
+								ts = ts.replace(month=n)
+								break
+							except ValueError:
+								if ts.day <= 28: raise
+								ts = ts.replace(day=ts.day-1)
 			elif offset.total_seconds() != 0:
 				ts += offset
 				if offset.seconds: delta_has_time = True
