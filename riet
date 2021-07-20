@@ -554,7 +554,7 @@ def parse_ts_interval(ts_str):
 	#       ["at"] [TIME ["[" TZ "]"]]
 	#     | DELTA-SPEC "interval" }
 	#   suffix: st, nd, rd, th
-	#   example: every 1st-11th at 5am UTC
+	#   example: every 1st-11th at 5am [UTC]
 	# DELTA-SPEC:
 	#   ( N || unit )+
 	#   units:
@@ -1105,10 +1105,12 @@ def _check_feed(fp, ts_now, ev, conf_base, state, ts_max):
 		for k in fk_last_id, fk_etag: state.pop(k, None)
 	feed_etag = state.get(fk_etag, '')
 	log.debug('Fetching feed: {} (etag={!r})', feed_url, feed_etag)
-	feed = fp.parse( feed_url, agent=feed_ua,
-		etag=feed_etag, request_headers=dict(Accept=conf.feed_accept_header) )
-	status, bozo, bozo_err = (
-		feed.get(k) for k in ['status', 'bozo', 'bozo_exception'] )
+	try:
+		feed = fp.parse( feed_url, agent=feed_ua,
+			etag=feed_etag, request_headers=dict(Accept=conf.feed_accept_header) )
+		status, bozo, bozo_err = (
+			feed.get(k) for k in ['status', 'bozo', 'bozo_exception'] )
+	except Exception as err: status, bozo, bozo_err = None, True, err_fmt(err)
 	if (not status and bozo) or (status or 1000) >= 400:
 		log.info('Failed to fetch feed (status={}): {} - {}', status, feed_url, bozo_err)
 		return # check_ts_last not updated
