@@ -1387,14 +1387,19 @@ def main(args=None):
 			print(f'ERROR: failed to parse {value!r} (key={key}): {err_fmt(err)}', file=sys.stderr)
 			print(f'(hint: timezone should usually be in square brackets)', file=sys.stderr)
 			return 1
+		res_pre = f'Parsed value (field={key}): '
 		res_str = ( repr_ts(res) if isinstance(res, dt.datetime)
 			else str(res).replace('datetime.', '').replace('timedelta(', 'td(') )
-		if len(res_str) > 50: res_str = '\n' + text_fill(res_str, len(res_str) / 2 + 5, ' '*2, ' '*4)
+		if len(res_str) > 100 - len(res_pre):
+			res_str = '\n' + text_fill(res_str, len(res_str) / 2 + 5, ' '*2, ' '*4)
 		print(f'Raw value: {value!r}')
-		print(f'Parsed value (field={key}): {res_str}')
+		print(f'{res_pre}{res_str}')
+		if isinstance(res, dt.datetime):
+			res_str_utc = conv_ts_utc(res).strftime('%a %Y-%m-%d %H:%M:%S [UTC]')
+			print(f'{" "*len(res_pre)}{res_str_utc}')
 		if isinstance(res, dt.timedelta): print(f'Total seconds: {res.total_seconds()}')
-		if isinstance(res, dt.datetime): print(f'POSIX timestamp: {res.timestamp()}')
-		if not isinstance(res, dt.timedelta):
+		if isinstance(res, dt.datetime):
+			print(f'POSIX timestamp: {res.timestamp()}')
 			ts_now = dt.datetime.now()
 			if res.tzinfo: ts_now = conv_ts_utc(ts_now)
 			offset_dir = 'now'
