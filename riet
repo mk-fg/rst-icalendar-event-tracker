@@ -1256,7 +1256,7 @@ def text_report_gen(dst, ts_now, day0, day1, events, text_params, conky=False):
 					ext=None if delta.total_seconds() >= 0 else 'ago' )
 				if not conky: title = f'[ {delta_str:>6} ]  {cal.title}'
 				else:
-					title = cal.title
+					title = cal.title.replace('#', r'\#') # comment chars in conky syntax
 					if title not in delta_dedup:
 						delta_dedup.add(title)
 						title += f'${{alignr}}${{color {conky_eta_color(delta, cc)}}}[ {delta_str} ]'
