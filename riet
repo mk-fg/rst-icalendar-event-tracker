@@ -1399,7 +1399,7 @@ def main(args=None):
 			print(f'{" "*len(res_pre)}{res_str_utc}')
 		if isinstance(res, dt.timedelta): print(f'Total seconds: {res.total_seconds()}')
 		if isinstance(res, dt.datetime):
-			print(f'POSIX timestamp: {res.timestamp()}')
+			print(f'POSIX timestamp: {res.timestamp()}'.removesuffix('.0'))
 			ts_now = dt.datetime.now()
 			if res.tzinfo: ts_now = conv_ts_utc(ts_now)
 			offset_dir = 'now'
