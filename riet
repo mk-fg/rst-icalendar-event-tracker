@@ -821,7 +821,7 @@ def parse_data_from_rst(rst_str):
 			rst_cal_list(e, depth+1, e_sec or sections, cals, conf)
 		return cals, conf
 
-	settings = rst_front.OptionParser(components=(rst.Parser,)).get_default_values()
+	settings = rst_front.get_default_settings(rst.Parser)
 	rst_tree = rst_utils.new_document('cal_list', settings)
 	rst.Parser().parse(rst_str, rst_tree)
 	return rst_cal_list(rst_tree)
