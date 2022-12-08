@@ -641,8 +641,9 @@ def parse_ts_interval(ts_str):
 
 def repr_ts(ts):
 	if not ts: return str(ts)
-	return conv_ts_local(ts)\
-		.strftime('[%a %Y-%m-%d %H:%M:%S.%f %z]')
+	ts = conv_ts_local(ts)
+	us = '.%f' if ts.microsecond else ''
+	return ts.strftime(f'[%a %Y-%m-%d %H:%M:%S{us} %z]')
 
 def repr_ts_diff( ts, ts0=None,
 		ext=None, units_max=2, units_res=None,
