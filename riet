@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 
 import itertools as it, operator as op, functools as ft
-import os, sys, logging, re, time, math, subprocess
-import datetime as dt, collections as cs, pathlib as pl
-import contextlib, tempfile, stat, base64, hashlib, json, unicodedata
+import datetime as dt, zoneinfo as zi, collections as cs, pathlib as pl
+import subprocess as sp, contextlib as cl, unicodedata as ud, hashlib as hl
+import tempfile, stat, base64, hashlib, json
+import os, sys, logging, re, time, math
 
-import pytz
 # As-needed deps: docutils, icalendar, feedparser
 
 
@@ -73,12 +73,12 @@ def enum_func(opts, default=None, mutex_flags=False, **opts_kws):
 		make_enum._null = make_enum()
 	return make_enum
 
-@contextlib.contextmanager
+@cl.contextmanager
 def safe_replacement(path, *open_args, mode=None, **open_kws):
 	path = str(path)
 	if mode is None:
-		try: mode = stat.S_IMODE(os.lstat(path).st_mode)
-		except OSError: pass
+		with cl.suppress(OSError):
+			mode = stat.S_IMODE(os.lstat(path).st_mode)
 	open_kws.update( delete=False,
 		dir=os.path.dirname(path), prefix=os.path.basename(path)+'.' )
 	if not open_args: open_kws['mode'] = 'w'
@@ -89,8 +89,7 @@ def safe_replacement(path, *open_args, mode=None, **open_kws):
 			if not tmp.closed: tmp.flush()
 			os.rename(tmp.name, path)
 		finally:
-			try: os.unlink(tmp.name)
-			except OSError: pass
+			with cl.suppress(OSError): os.unlink(tmp.name)
 
 def retries_within_timeout(
 		tries, timeout, acc=True, reverse=False,
@@ -118,7 +117,7 @@ def retries_within_timeout(
 	return delays
 
 str_hash = lambda p: base64.urlsafe_b64encode(
-	hashlib.blake2s(str(p).encode(), key=b'riet.path_hash').digest() ).decode()[:12]
+	hl.blake2s(str(p).encode(), key=b'riet.path_hash').digest() ).decode()[:12]
 
 def tuple_hash(*data):
 	if len(data) == 1 and isinstance(data[0], (tuple, list)): data = data[0]
@@ -137,7 +136,7 @@ def tuple_hash(*data):
 
 bb = lambda v: v.encode() if isinstance(v, str) else v
 ss = lambda v: v.decode() if isinstance(v, bytes) else v
-cc = lambda v: unicodedata.normalize('NFKC', v).casefold()
+cc = lambda v: ud.normalize('NFKC', v).casefold()
 
 
 
@@ -257,14 +256,11 @@ class SDBus:
 def get_local_tz():
 	# Cached on first access to avoid dbus call on import
 	if get_local_tz.cache: return get_local_tz.cache
-
-	tz = os.environ.get('TZ', '').strip()
-	if tz:
-		get_local_tz.cache = pytz.timezone(tz)
+	if tz := os.environ.get('TZ', '').strip():
+		get_local_tz.cache = zi.ZoneInfo(tz)
 		return get_local_tz.cache
-
 	tz = SDBus().get('org.freedesktop.timedate1.Timezone', system=True)
-	get_local_tz.cache = pytz.timezone(tz.decode())
+	get_local_tz.cache = zi.ZoneInfo(tz.decode())
 	return get_local_tz.cache
 get_local_tz.cache = None
 
@@ -303,8 +299,7 @@ def get_dbus_notify_func(**defaults):
 			replaces_id=None, actions=None, hints=None, timeout=None ):
 		args, kws, sig_arrays = list(), locals(), list()
 		for k, default in defaults.items():
-			v = kws.get(k)
-			if v is None: v = default
+			if (v := kws.get(k)) is None: v = default
 			if k in ['actions', 'hints']:
 				arr_sig, arr_args = encode_array(v)
 				sig_arrays.extend(arr_sig)
@@ -324,21 +319,7 @@ def get_dbus_notify_func(**defaults):
 class TSParseError(Exception): pass
 class TSOverflow(Exception): pass
 
-class FixedOffsetTZ(dt.tzinfo):
-	_offset = _name = None
-	@classmethod
-	def from_offset(cls, name=None, delta=None, hh=None, mm=None):
-		self = cls()
-		if delta is None: delta = dt.timedelta(hours=hh or 0, minutes=mm or 0)
-		self._name, self._offset = name, delta
-		return self
-	def utcoffset(self, dt): return self._offset
-	def tzname(self, dt): return self._name
-	def dst(self, dt, ZERO=dt.timedelta(0)): return ZERO
-	def localize(self, dt, is_dst=False): return dt.replace(tzinfo=self)
-	def __repr__(self): return f'<FixedOffset {self._name!r}>'
-
-# Common timezone abbrevs which pytz refuses to handle
+# Common timezone abbrevs which tz db does not handle
 # Use make-tza-map.py script to produce these mappings from timezonedb.com/download csv
 tza_map = dict((cc(k), v) for k, v in (line.split('=', 1) for line in '''
 	EMT=Pacific/Easter PPT=America/Los_Angeles YST=America/Anchorage JST=Asia/Tokyo
@@ -417,8 +398,8 @@ def conv_ts_utc(ts):
 	'Interpret any naive datetime as local-tz and convert to UTC.'
 	if ts is None: return
 	if isinstance(ts, (int, float)): ts = dt.datetime.fromtimestamp(ts)
-	if not ts.tzinfo: ts = get_local_tz().localize(ts, is_dst=None)
-	return ts.astimezone(pytz.utc)
+	if not ts.tzinfo: ts = ts.replace(tzinfo=get_local_tz())
+	return ts.astimezone(dt.timezone.utc)
 
 def conv_ts_local(ts):
 	'Convert datetime to local timezone for human output.'
@@ -442,8 +423,8 @@ def parse_delta_spec(ts_str):
 	return IntervalDelta(**delta)
 
 def parse_duration(ts_str):
-	m = _short_ts_re.search(ts_str)
-	if not m or not any(m.groups()): raise TSParseError(ts_str)
+	if ( not (m := _short_ts_re.search(ts_str))
+		or not any(m.groups()) ): raise TSParseError(ts_str)
 	delta = list()
 	for units in _short_ts_days, _short_ts_s:
 		val = 0
@@ -464,42 +445,38 @@ def parse_ts_or_interval(ts_str, multiple=False):
 	return ts
 
 def parse_tz(tz_str):
-	m = re.search(r'^([-+])(\d{1,2}):?(\d\d)?$', tz_str)
-	if m:
+	if m := re.search(r'^([-+])(\d{1,2}):?(\d\d)?$', tz_str):
 		s, hh, mm = m.groups()
 		s = int(f'{s}1')
-		tz = FixedOffsetTZ.from_offset(
-			f'{s}{int(hh):02d}{int(mm or 0):02d}', hh=s*int(hh), mm=s*int(mm or 0) )
-	else: tz = pytz.timezone(tza_map.get(cc(tz_str), tz_str))
+		tz = dt.timezone(
+			dt.timedelta(hours=s*int(hh), minutes=s*int(mm or 0)),
+			name=f'{s}{int(hh):02d}{int(mm or 0):02d}' )
+	else: tz = zi.ZoneInfo(tza_map.get(cc(tz_str), tz_str))
 	return tz
 
 def parse_ts(ts_str, in_future=True, multiple=False):
 	assert isinstance(ts_str, str), [type(ts_str), repr(ts_str)]
 	ts = tz = None
-	m = re.search(r'(.*)?\s+\[([^\]]+)\]\s*$', ts_str)
-	if m:
+	if m := re.search(r'(.*)?\s+\[([^\]]+)\]\s*$', ts_str):
 		ts_str, tz = m.groups()
 		tz = tz.strip()
 		tz = parse_tz(tz)
 	if not ts: # common BE date format, with optional time
-		match = re.search(
-			r'^(?P<date>(?:\d{2}|(?P<Y>\d{4}))-\d{2}-\d{2})'
-			r'(?:[ T](?P<time>\d{2}(?::\d{2}(?::\d{2})?)?)?)?$', ts_str )
-		if match:
-			tpl = 'y' if not match.group('Y') else 'Y'
-			tpl, ts_str = f'%{tpl}-%m-%d', match.group('date')
-			if match.group('time'):
+		if m := re.search(
+				r'^(?P<date>(?:\d{2}|(?P<Y>\d{4}))-\d{2}-\d{2})'
+				r'(?:[ T](?P<time>\d{2}(?::\d{2}(?::\d{2})?)?)?)?$', ts_str ):
+			tpl = 'y' if not m.group('Y') else 'Y'
+			tpl, ts_str = f'%{tpl}-%m-%d', m.group('date')
+			if m.group('time'):
 				tpl_time = ['%H', '%M', '%S']
-				ts_str_time = match.group('time').split(':')
-				ts_str += ' ' + ':'.join(ts_str_time)
+				ts_str += ' ' + ':'.join(ts_str_time := m.group('time').split(':'))
 				tpl += ' ' + ':'.join(tpl_time[:len(ts_str_time)])
 			try: ts = dt.datetime.strptime(ts_str, tpl)
 			except ValueError: pass
 	if not ts: # just time without AM/PM - treat as 24h format
-		match = re.search(r'^\d{1,2}:\d{2}(?::\d{2}(?P<us>\.\d+)?)?$', ts_str)
-		if match:
+		if m := re.search(r'^\d{1,2}:\d{2}(?::\d{2}(?P<us>\.\d+)?)?$', ts_str):
 			us, tpl = 0, ':'.join(['%H', '%M', '%S'][:len(ts_str.split(':'))])
-			if match.group('us'):
+			if m.group('us'):
 				ts_str, us = ts_str.rsplit('.', 1)
 				us = us[:6] + '0'*max(0, 6 - len(us))
 			try: ts_time = dt.datetime.strptime(ts_str, tpl)
@@ -515,8 +492,8 @@ def parse_ts(ts_str, in_future=True, multiple=False):
 		if in_future: ts_now_sec, ts_now_date = time.time(), dt.date.today()
 		while True:
 			ts_str_ext = ' '.join(ts_ext)
-			res = subprocess.run( ['date', '+%s', '-d', ts_str_ext],
-					stdout=subprocess.PIPE, stderr=subprocess.DEVNULL )
+			res = sp.run(
+				['date', '+%s', '-d', ts_str_ext], stdout=sp.PIPE, stderr=sp.DEVNULL )
 			if not res.returncode:
 				val = int(res.stdout.strip())
 				# Try to add +1 day to simple timestamps like 3:00 if they're in the past
@@ -541,7 +518,7 @@ def parse_ts(ts_str, in_future=True, multiple=False):
 		if multiple: ts = ts_list + [ts]
 	if ts:
 		if not isinstance(ts, list): ts = [ts]
-		if tz: ts = list(tz.localize(ts, is_dst=None) for ts in ts)
+		if tz: ts = list(ts.replace(tzinfo=tz) for ts in ts)
 		if not multiple: ts = ts[-1]
 		return ts
 	raise TSParseError(ts_str)
@@ -570,7 +547,7 @@ def parse_ts_interval(ts_str):
 	# TZ:
 	#   ( "UTC" | ("+"|"-") HH:MM | region/place | abbrev )
 	#   examples: +05:00, America/Los_Angeles, BST
-	#     (anything that pytz can parse, basically)
+	#     (anything that parse_tz can handle, basically)
 	# TIME:
 	#   ( [H]H[:MM[:SS]] ["am"|"pm"] | "noon" | "midnight" )
 
@@ -586,9 +563,8 @@ def parse_ts_interval(ts_str):
 
 	# ( NN[suffix][ "-" MM[suffix]] )+
 	while True:
-		m = re.search( r'(?i)^(?P<a>\d+)(st|nd|rd|th)?'
-			r'(\s*-\s*(?P<b>\d+)(st|nd|rd|th)?)?' + ts_str_re, ts_str )
-		if not m: break
+		if not (m := re.search( r'(?i)^(?P<a>\d+)(st|nd|rd|th)?'
+			r'(\s*-\s*(?P<b>\d+)(st|nd|rd|th)?)?' + ts_str_re, ts_str )): break
 		a, b, ts_str = m.group('a'), m.group('b'), m.group('rest') or ''
 		if b: mo_days.update(range(int(a), int(b)+1))
 		else: mo_days.add(int(a))
@@ -611,30 +587,26 @@ def parse_ts_interval(ts_str):
 	wd_match = lambda s: next( n for n, wd in
 		enumerate(_filter_weekdays, 1) if s.startswith(wd[0]) )
 	while True:
-		m = wd_re.search(ts_str)
-		if not m: break
+		if not (m := wd_re.search(ts_str)): break
 		a, b, ts_str = m.group('a'), m.group('b'), m.group('rest') or ''
 		if b: weekdays.update(range(wd_match(a.lower()), wd_match(b.lower())+1))
 		else: weekdays.add(wd_match(a.lower()))
 	# "at"
-	m = re.search(r'(?i)^\s*at' + ts_str_re, ts_str)
-	if m: ts_str = m.group('rest') or ''
+	if m := re.search(r'(?i)^\s*at' + ts_str_re, ts_str): ts_str = m.group('rest') or ''
 	# TIME
-	m = re.search(r'(?i)^(noon|midnight)\b' + ts_str_re, ts_str)
-	if m:
+	if m := re.search(r'(?i)^(noon|midnight)\b' + ts_str_re, ts_str):
 		spec = m.group(1)
 		ts_str = dict(noon='12:00', midnight='00:00')[spec]
 		if m.group('rest'): ts_str += ' ' + m.group('rest')
-	m = re.search( r'(?i)^(?P<h>\d{1,2})(:(?P<m>\d{2})'
-		r'(:(?P<s>\d{2}))?)?(\s*(?P<x>am|pm))?' + ts_str_re, ts_str )
-	if m:
+	if m := re.search( r'(?i)^(?P<h>\d{1,2})(:(?P<m>\d{2})'
+			r'(:(?P<s>\d{2}))?)?(\s*(?P<x>am|pm))?' + ts_str_re, ts_str ):
 		x, ts_str = m.group('x'), m.group('rest') or ''
 		h, m, s = (int(m.group(k) or 0) for k in 'h m s'.split())
 		if x and x.lower() == 'pm': h = h%12 + 12
 		dt_filter['time'] = h, m, s
 	# TZ
-	m = re.search(r'^\[\s*(\S.*\S)\s*\]' + ts_str_re, ts_str)
-	if m: dt_filter['tz'], ts_str = pytz.timezone(m.group(1).replace(' ', '_')), m.group('rest')
+	if m := re.search(r'^\[\s*(\S.*\S)\s*\]' + ts_str_re, ts_str):
+		dt_filter['tz'], ts_str = zi.ZoneInfo(m.group(1).replace(' ', '_')), m.group('rest')
 	# Leftovers
 	if ts_str: raise TSParseError(ts_str)
 	return IntervalFilter(**dt_filter)
@@ -657,8 +629,7 @@ def repr_ts_diff( ts, ts0=None,
 		delta = abs(ts - ts0)
 	res, s, n_last = list(), delta.total_seconds(), units_max - 1
 	for unit, unit_s in sorted(_units.items(), key=op.itemgetter(1), reverse=True):
-		val = math.floor(s / unit_s)
-		if not val:
+		if not (val := math.floor(s / unit_s)):
 			if units_res == unit: break
 			continue
 		if len(res) == n_last or units_res == unit:
@@ -702,7 +673,7 @@ def apply_ts_delta( ts, delta,
 		while True:
 			if ts_ref > ts_limit: raise TSOverflow(ts_limit, delta)
 			ts_ref += delta_1d
-			if delta.tz: ts = delta.tz.localize(ts_ref.replace(tzinfo=None), is_dst=None)
+			if delta.tz: ts = ts_ref.replace(tzinfo=delta.tz)
 			else: ts = conv_ts_local(ts_ref)
 			if ( delta.mo_days
 				and isinstance(delta.mo_days, set)
@@ -710,8 +681,7 @@ def apply_ts_delta( ts, delta,
 			if delta.weekdays and ts.isoweekday() not in delta.weekdays: continue
 			ts = ts.replace( microsecond=0,
 				**dict(zip('hour minute second'.split(), delta.time or (0, 0, 0))) )
-			ts = conv_ts_utc(ts)
-			if ts > ts0: break
+			if (ts := conv_ts_utc(ts)) > ts0: break
 	else: raise NotImplementedError(delta)
 	return ts
 
@@ -756,8 +726,7 @@ def parse_data_from_rst(rst_str):
 			for e in es:
 				if e.tagname == tag: collect(e)
 				if recursive:
-					e = rst_lookup(e, tag, **opts)
-					if e: collect(e)
+					if e := rst_lookup(e, tag, **opts): collect(e)
 		except RstLookupFound as res:
 			res = res.args[0]
 			return res if not text else res.astext()
@@ -780,8 +749,7 @@ def parse_data_from_rst(rst_str):
 			ts_str_list, res['ts'] = res['ts'], list()
 			res['raw_ts'] = ts_str_list
 			for ts in ts_str_list:
-				ts = ts_str_norm(ts)
-				if not ts: continue
+				if not (ts := ts_str_norm(ts)): continue
 				res['ts'].extend(parse_ts_or_interval(ts, multiple=True))
 		else: res['ts'] = res['raw_ts'] = list()
 		for k in 'ts_start', 'ts_end', 'duration':
@@ -811,8 +779,7 @@ def parse_data_from_rst(rst_str):
 			e_sec = None
 			if e.tagname == 'section':
 				e_sec = sections.copy() + [rst_lookup(e, 'title')]
-			cal_info = rst_cal_info(e)
-			if cal_info:
+			if cal_info := rst_cal_info(e):
 				if not cal_info.get('title'):
 					cal_info['title'] = ( e_sec[-1]
 						if e_sec else rst_lookup(e, 'paragraph') )
@@ -862,8 +829,7 @@ def conf_update(conf, update):
 	conf = adict(conf.copy())
 	for k, v in (update or dict()).items():
 		if k.startswith('_'): continue
-		k = k.replace('-', '_')
-		v_def = conf_defaults.get(k)
+		v_def = conf_defaults.get(k := k.replace('-', '_'))
 		if v_def is None: continue
 		if isinstance(v, list): v = v[-1]
 		if isinstance(v_def, str): pass
@@ -958,7 +924,7 @@ def cal_list_to_events(cal_list, ts_min, ts_max, state):
 ### Approaching-time notification events
 
 def issue_notifications(ev_list, conf, state):
-	ts_now = dt.datetime.utcnow().replace(tzinfo=pytz.utc)
+	ts_now = dt.datetime.utcnow().replace(tzinfo=dt.timezone.utc)
 	ts_min, ts_max = ts_now - conf.note_ts_window_past, ts_now + conf.note_ts_window
 	err_warn_dedup = set()
 	method_funcs = dict(dnote=note_ts_dnote)
@@ -1019,7 +985,7 @@ def note_ts_dnote(ev, conf, ts_now):
 def check_feeds(ev_list, conf, state, ts_max, socket_timeout=...):
 	import feedparser, socket
 	if socket_timeout is not ...: socket.setdefaulttimeout(socket_timeout)
-	ts_now = dt.datetime.utcnow().replace(tzinfo=pytz.utc)
+	ts_now = dt.datetime.utcnow().replace(tzinfo=dt.timezone.utc)
 	for ev in ev_list: _check_feed(feedparser, ts_now, ev, conf, state, ts_max)
 
 def _check_feed(fp, ts_now, ev, conf_base, state, ts_max):
@@ -1168,8 +1134,7 @@ def text_params_str_parse(text_params_str, base=text_params_default):
 			k, v = spec.split('=', 1)
 			if k not in text_params: raise ValueError(k)
 			text_params[k] = v
-		except ValueError:
-			parser.error(f'Invalid column/width spec: {spec!r}')
+		except ValueError: parser.error(f'Invalid column/width spec: {spec!r}')
 	return text_params
 
 def text_event_time_repr(ts_now, day, ts0, ts1):
@@ -1283,46 +1248,31 @@ def main(args=None):
 	text_params_default_str = ' '.join(f'{c}={o}' for c, o in text_params_default.items())
 
 	import argparse, textwrap
-
-	dedent = lambda text: (textwrap.dedent(text).strip('\n') + '\n').replace('\t', '  ')
+	dd = lambda text: re.sub( r' \t+', ' ',
+		textwrap.dedent(text).strip('\n') + '\n' ).replace('\t', '  ')
 	text_fill = lambda s,w=100,ind='\t',ind_next=None,**k: textwrap.fill(
 		s, w, initial_indent=ind, subsequent_indent=ind if ind_next is None else ind_next, **k )
-	class SmartHelpFormatter(argparse.HelpFormatter):
-		def __init__(self, *args, **kws):
-			return super().__init__(*args, **kws, width=100)
-		def _fill_text(self, text, width, indent):
-			if '\n' not in text: return super()._fill_text(text, width, indent)
-			return ''.join( indent + line
-				for line in text.replace('\t', '  ').splitlines(keepends=True) )
-		def _split_lines(self, text, width):
-			return super()._split_lines(text, width)\
-				if '\n' not in text else dedent(text).splitlines()
 
 	parser = argparse.ArgumentParser(
-		formatter_class=SmartHelpFormatter,
+		formatter_class=argparse.RawTextHelpFormatter,
 		description='ReST-based calendar parser and online event tracker.')
 
 	group = parser.add_argument_group('Input/output options')
-	group.add_argument('rst_file', nargs='?',
-		help='''
-			ReST (.rst) file with calendar and event descriptions.
-			Will be read from stdin, if "-" or not specified.''')
-	group.add_argument('-i', '--ical', metavar='path',
-		help='''
-			Generate ICS (icalendar) output file at specified path.
-			"-" can be unsed instead of path to output to stdout instead.''')
-	group.add_argument('-p', '--plain', metavar='path',
-		help='''
-			Generate simple plaintext calendar, somewhat similar
-				to conky config snippet, except without any conky-specific markup.
-			 "-" can be unsed instead of path to output to stdout instead.''')
-	group.add_argument('-c', '--conky', metavar='path',
-		help='''
-			Generate conky configuration snippet for e.g. execi or catp include/command.
-			 "-" can be unsed instead of path to output to stdout instead.''')
+	group.add_argument('rst_file', nargs='?', help=dd('''
+		ReST (.rst) file with calendar and event descriptions.
+		Will be read from stdin, if "-" or not specified.'''))
+	group.add_argument('-i', '--ical', metavar='path', help=dd('''
+		Generate ICS (icalendar) output file at specified path.
+		"-" can be unsed instead of path to output to stdout instead.'''))
+	group.add_argument('-p', '--plain', metavar='path', help=dd('''
+		Generate simple plaintext calendar, somewhat similar
+			to conky config snippet, except without any conky-specific markup.
+		 "-" can be unsed instead of path to output to stdout instead.'''))
+	group.add_argument('-c', '--conky', metavar='path', help=dd('''
+		Generate conky configuration snippet for e.g. execi or catp include/command.
+		 "-" can be unsed instead of path to output to stdout instead.'''))
 	group.add_argument('-o', '--text-params',
-		metavar='pos=offset,color=value,...', default=text_params_default_str,
-		help='''
+		metavar='pos=offset,color=value,...', default=text_params_default_str, help=dd('''
 			Various text and conky config parameters in calendar table(s)
 				generated by either -p/--plain or -c/--conky options.
 			Overrides for one or more values can be specified in any order,
@@ -1330,7 +1280,7 @@ def main(args=None):
 			For conky config, these can also be
 				overidden on per-item basis via :conky: parameter in rst.
 			Default parameters are:\n{}'''.format(
-				text_fill(text_params_default_str, len(text_params_default_str) // 5 - 5, '\t'*4) ))
+				text_fill(text_params_default_str, len(text_params_default_str) // 5 - 5, '\t'*4) )))
 	group.add_argument('-f', '--feeds', action='store_true',
 		help='Check any embedded feed URLs and notify about any updates there.')
 	group.add_argument('--feeds-socket-timeout',
@@ -1348,28 +1298,25 @@ def main(args=None):
 
 	group = parser.add_argument_group('State tracking')
 	group.add_argument('-d', '--state-file',
-		metavar='path-tpl', default='/var/tmp/riet/src.{hash}.json',
-		help='''
+		metavar='path-tpl', default='/var/tmp/riet/src.{hash}.json', help=dd('''
 			Path or template for one, that will be used to store
 					state for when "every X interval" entries were last displayed.
 				"hash" component in the template will be replaced by hash of source rst path.
 				Static path (no "{hash}" thing) must be specified to use with rst from stdin.
-				Can be set to "-" to not track it and recalculate them from --time-start on each run.''')
-	group.add_argument('-r', '--state-reset', metavar='title',
-		help='Reset state for events with matching title'
-				' (case-insensitive string-in-title match).'
-			' Will raise error if no match was found.')
+				Can be set to "-" to not track it and recalculate them from --time-start on each run.'''))
+	group.add_argument('-r', '--state-reset', metavar='title', help=dd('''
+		Reset state for events with matching title (case-insensitive string-in-title match).
+		Will raise error if no match was found.'''))
 	group.add_argument('--state-flush',
 		action='store_true', help='Discard any existing --state-file data.')
 	group.add_argument('--state-preserve',
 		action='store_true', help='Read/use, but do not update --state-file data.')
 
 	group = parser.add_argument_group('Misc options')
-	group.add_argument('-t', '--test-parse', metavar='( date/time | key=value )',
-		help='''
-			Test parsing specified date/time string, print resulting value and exit.
-			Optionally, key=value entry can be specified, with one of the following
-				keys (corresponding to ones in rst items): ts, ts-start, ts-end, duration.''')
+	group.add_argument('-t', '--test-parse', metavar='( date/time | key=value )', help=dd('''
+		Test parsing specified date/time string, print resulting value and exit.
+		Optionally, key=value entry can be specified, with one of the following
+			keys (corresponding to ones in rst items): ts, ts-start, ts-end, duration.'''))
 	group.add_argument('--debug', action='store_true', help='Verbose operation mode.')
 
 	opts = parser.parse_args(sys.argv[1:] if args is None else args)
@@ -1481,7 +1428,7 @@ def main(args=None):
 
 	if opts.conky or opts.plain:
 		ev_list.sort(key=op.attrgetter('ts0'))
-		ts_now = dt.datetime.utcnow().replace(tzinfo=pytz.utc)
+		ts_now = dt.datetime.utcnow().replace(tzinfo=dt.timezone.utc)
 		day0, day1 = conv_ts_local(ts_min).date(), conv_ts_local(ts_max).date()
 		for report_type in 'conky', 'plain':
 			path = getattr(opts, report_type)

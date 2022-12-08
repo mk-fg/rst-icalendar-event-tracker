@@ -73,7 +73,7 @@ Approaching-time notification options:
 Desktop notification options:
 
   :dnote-enabled: true
-  :dnote-icon: nwn
+  :dnote-icon: feed-new
   :dnote-timeout: 0
   :dnote-app: riet
   :dnote-urgency: 2
@@ -248,9 +248,6 @@ Podcasts
     Specified feed-rss will be checked only if event falls within output
     timespan. See also ``:feed-interval-checks:`` option.
 
-  .. TODO: implement url/feed checks
-  .. TODO: note on options with parameters for such event and feed checks.
-
 - Hello Internet
 
   :ts-start: Tue Jan 2 2018 [US/Eastern]
@@ -277,13 +274,12 @@ or too annoying to use.
 - Factorio mods
 
   :ts: every 2w interval
+  :url: https://mods.factorio.com/mod/Moon_Logic/discussion
   :url: https://mods.factorio.com/mod/Will-o-the-Wisps_updated/discussion
-  :url: https://mods.factorio.com/mod/Vehicle_Cruise_Control/discussion
-  :url: https://mods.factorio.com/mod/Burner_Drill_4x4_Area/discussion
 
   Note: multiple URLs to check.
 
-  .. TODO: info on url-checking parameters.
+  .. TODO: implement url-checking parameters, add info here.
 
 - Stellaris mods
 
