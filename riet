@@ -345,7 +345,7 @@ tza_map = dict((cc(k), v) for k, v in (line.split('=', 1) for line in '''
 	SAST=Africa/Johannesburg ACDT=Australia/Adelaide ACST=Australia/Adelaide
 	NZST=Pacific/Auckland EDT=America/New_York IDDT=Asia/Jerusalem
 	DMT=Europe/Dublin AHST=America/Anchorage PT=America/Los_Angeles
-	ET=America/New_York MT=America/Phoenix CT=America/Chicago'''.split()))
+	ET=America/New_York MT=America/Phoenix CT=America/Chicago UTC=UTC'''.split()))
 
 IntervalFilter = cs.namedtuple('interval_filter', 'mo_days weekdays time tz')
 IntervalDelta = cs.namedtuple('interval_delta', 'y mo w d h m s')
@@ -490,9 +490,10 @@ def parse_ts(ts_str, in_future=True, multiple=False):
 		ts_ext, ts_list = [ts_str], list()
 		if in_future: ts_now_sec, ts_now_date = time.time(), dt.date.today()
 		while True:
-			ts_str_ext = ' '.join(ts_ext)
-			res = sp.run(
-				['date', '+%s', '-d', ts_str_ext], stdout=sp.PIPE, stderr=sp.DEVNULL )
+			ts_str_ext, tz_env = ' '.join(ts_ext), dict(os.environ)
+			if tz: tz_env['TZ'] = tz.key # to fix in_future checks before tz adjustment
+			res = sp.run( ['date', '+%s', '-d', ts_str_ext],
+				stdout=sp.PIPE, stderr=sp.DEVNULL, env=tz_env )
 			if not res.returncode:
 				val = int(res.stdout.strip())
 				# Try to add +1 day to simple timestamps like 3:00 if they're in the past
@@ -502,7 +503,7 @@ def parse_ts(ts_str, in_future=True, multiple=False):
 					ts_list.append(ts)
 					ts_ext.append('+ 1 day') # note: just val+=24*3600 can be incorrect due to DST
 					continue
-				ts = dt.datetime.fromtimestamp(val) # note: naive dt in local tz
+				ts = dt.datetime.fromtimestamp(val, tz=tz) # note: can be naive dt in local tz
 				# Try to add +1 year to timestamps that don't
 				#  have a YYYY spec and resolve to past dates
 				if ( in_future and 0 < ts_now_sec - val <= 365*24*3600
