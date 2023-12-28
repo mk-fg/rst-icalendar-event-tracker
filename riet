@@ -478,6 +478,7 @@ def parse_ts(ts_str, in_future=True, multiple=False):
 		if m.group('us'):
 			tss, us = ts_str.rsplit('.', 1)
 			us = us[:6] + '0'*max(0, 6 - len(us))
+		else: tss = ts_str
 		try: ts_time = dt.datetime.strptime(tss, tpl)
 		except ValueError: pass
 		else:
