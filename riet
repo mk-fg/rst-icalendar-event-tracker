@@ -925,7 +925,7 @@ def cal_list_to_events(cal_list, ts_min, ts_max, state):
 ### Approaching-time notification events
 
 def issue_notifications(ev_list, conf, state):
-	ts_now = dt.datetime.utcnow().replace(tzinfo=dt.timezone.utc)
+	ts_now = dt.datetime.now(dt.UTC)
 	ts_min, ts_max = ts_now - conf.note_ts_window_past, ts_now + conf.note_ts_window
 	err_warn_dedup = set()
 	method_funcs = dict(dnote=note_ts_dnote)
@@ -986,7 +986,7 @@ def note_ts_dnote(ev, conf, ts_now):
 def check_feeds(ev_list, conf, state, ts_max, socket_timeout=...):
 	import feedparser, socket
 	if socket_timeout is not ...: socket.setdefaulttimeout(socket_timeout)
-	ts_now = dt.datetime.utcnow().replace(tzinfo=dt.timezone.utc)
+	ts_now = dt.datetime.now(dt.UTC)
 	for ev in ev_list: _check_feed(feedparser, ts_now, ev, conf, state, ts_max)
 
 def _check_feed(fp, ts_now, ev, conf_base, state, ts_max):
@@ -1429,7 +1429,7 @@ def main(args=None):
 
 	if opts.conky or opts.plain:
 		ev_list.sort(key=op.attrgetter('ts0'))
-		ts_now = dt.datetime.utcnow().replace(tzinfo=dt.timezone.utc)
+		ts_now = dt.datetime.now(dt.UTC)
 		day0, day1 = conv_ts_local(ts_min).date(), conv_ts_local(ts_max).date()
 		for report_type in 'conky', 'plain':
 			path = getattr(opts, report_type)
